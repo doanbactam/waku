@@ -4,6 +4,7 @@
 
 use std::fs;
 
+#[cfg(target_os = "macos")]
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -182,6 +183,7 @@ fn build_grok_computer_use_config(
             grok_home.display()
         )
     })?;
+    #[cfg(target_os = "macos")]
     fs::set_permissions(&grok_home, fs::Permissions::from_mode(0o700)).with_context(|| {
         format!(
             "could not secure isolated Grok home {}",
@@ -200,6 +202,7 @@ fn build_grok_computer_use_config(
             ) {
                 continue;
             }
+            #[cfg(target_os = "macos")]
             symlink(entry.path(), grok_home.join(name)).with_context(|| {
                 format!(
                     "could not mirror Grok runtime resource {}",

@@ -1,17 +1,28 @@
+#[cfg(target_os = "macos")]
 use std::fs;
+#[cfg(target_os = "macos")]
 use std::io::Write as _;
+#[cfg(target_os = "macos")]
 use std::os::unix::fs::DirBuilderExt as _;
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{Context as _, anyhow, bail};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(target_os = "macos")]
+use serde_json::json;
+#[cfg(target_os = "macos")]
 use uuid::Uuid;
 
+#[cfg(target_os = "macos")]
 const MAX_HELPER_OUTPUT_BYTES: usize = 24 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -166,6 +177,7 @@ pub struct PendingComputerApproval {
     pub sensitive: bool,
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct HelperResponse {
@@ -176,6 +188,7 @@ struct HelperResponse {
     permissions: Option<ComputerPermissions>,
 }
 
+#[cfg(target_os = "macos")]
 pub fn probe_permissions(prompt: bool) -> anyhow::Result<ComputerPermissions> {
     let operation = if prompt {
         json!({"operation": "requestPermissions"})
@@ -196,6 +209,12 @@ pub fn probe_permissions(prompt: bool) -> anyhow::Result<ComputerPermissions> {
     Ok(response.permissions.unwrap_or_default())
 }
 
+#[cfg(not(target_os = "macos"))]
+pub fn probe_permissions(_prompt: bool) -> anyhow::Result<ComputerPermissions> {
+    bail!("Computer Use is not supported on this platform")
+}
+
+#[cfg(target_os = "macos")]
 fn invoke_helper_direct(
     helper: &Path,
     operation: &Value,
@@ -236,6 +255,7 @@ fn invoke_helper_direct(
     serde_json::from_slice(&output.stdout).context("computer-use helper returned invalid JSON")
 }
 
+#[cfg(target_os = "macos")]
 fn helper_app_path() -> anyhow::Result<PathBuf> {
     let executable = std::env::current_exe().context("Waku executable path is unavailable")?;
     let macos = executable
@@ -267,6 +287,7 @@ pub fn helper_display_name() -> String {
         .unwrap_or_else(|| "Waku Computer Use".into())
 }
 
+#[cfg(target_os = "macos")]
 pub fn mcp_server_command() -> anyhow::Result<PathBuf> {
     let bundled_helper = helper_app_path()?;
     let helper = install_helper_app(&bundled_helper)?;
@@ -276,6 +297,12 @@ pub fn mcp_server_command() -> anyhow::Result<PathBuf> {
     Ok(helper.join("Contents").join("MacOS").join(executable))
 }
 
+#[cfg(not(target_os = "macos"))]
+pub fn mcp_server_command() -> anyhow::Result<PathBuf> {
+    bail!("Computer Use is not supported on this platform")
+}
+
+#[cfg(target_os = "macos")]
 pub fn js_repl_server_path() -> anyhow::Result<PathBuf> {
     let executable = std::env::current_exe().context("Waku executable path is unavailable")?;
     let macos = executable
@@ -291,6 +318,12 @@ pub fn js_repl_server_path() -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
+#[cfg(not(target_os = "macos"))]
+pub fn js_repl_server_path() -> anyhow::Result<PathBuf> {
+    bail!("Computer Use is not supported on this platform")
+}
+
+#[cfg(target_os = "macos")]
 pub fn pi_extension_path() -> anyhow::Result<PathBuf> {
     let executable = std::env::current_exe().context("Waku executable path is unavailable")?;
     let macos = executable
@@ -309,6 +342,11 @@ pub fn pi_extension_path() -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
+#[cfg(not(target_os = "macos"))]
+pub fn pi_extension_path() -> anyhow::Result<PathBuf> {
+    bail!("Computer Use is not supported on this platform")
+}
+
 /// Install the bundled helper as an independent, stable runtime service.
 ///
 /// Screen Recording differs from Accessibility on macOS: it follows the
@@ -317,13 +355,16 @@ pub fn pi_extension_path() -> anyhow::Result<PathBuf> {
 /// helper. Launching this standalone copy through Launch Services gives the
 /// helper its own TCC identity while the signed app bundle remains the source
 /// shipped with Waku.
+#[cfg(target_os = "macos")]
 fn install_helper_app(source: &Path) -> anyhow::Result<PathBuf> {
     let application_support =
         dirs::data_dir().ok_or_else(|| anyhow!("Application Support directory is unavailable"))?;
     let install_root = application_support.join("Waku").join("Computer Use");
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(target_os = "macos")]
+    builder.mode(0o700);
+    builder
         .create(&install_root)
         .with_context(|| format!("could not create {}", install_root.display()))?;
     let bundle_name = source
@@ -355,6 +396,7 @@ fn install_helper_app(source: &Path) -> anyhow::Result<PathBuf> {
     Ok(destination)
 }
 
+#[cfg(target_os = "macos")]
 fn helper_install_matches(source: &Path, destination: &Path) -> anyhow::Result<bool> {
     if !destination.is_dir() {
         return Ok(false);
@@ -367,6 +409,7 @@ fn helper_install_matches(source: &Path, destination: &Path) -> anyhow::Result<b
     Ok(source_fingerprint == installed_fingerprint)
 }
 
+#[cfg(target_os = "macos")]
 fn copy_directory(source: &Path, destination: &Path) -> anyhow::Result<()> {
     let metadata = fs::symlink_metadata(source)?;
     fs::create_dir(destination)?;
@@ -379,7 +422,7 @@ fn copy_directory(source: &Path, destination: &Path) -> anyhow::Result<()> {
         if file_type.is_dir() {
             copy_directory(&source_path, &destination_path)?;
         } else if file_type.is_symlink() {
-            std::os::unix::fs::symlink(fs::read_link(&source_path)?, &destination_path)?;
+            copy_symlink(&source_path, &destination_path)?;
         } else {
             fs::copy(&source_path, &destination_path)?;
             fs::set_permissions(
@@ -391,6 +434,13 @@ fn copy_directory(source: &Path, destination: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn copy_symlink(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    std::os::unix::fs::symlink(fs::read_link(source)?, destination)?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 pub fn skill_root_path() -> anyhow::Result<PathBuf> {
     let executable = std::env::current_exe().context("Waku executable path is unavailable")?;
     let macos = executable
@@ -404,6 +454,11 @@ pub fn skill_root_path() -> anyhow::Result<PathBuf> {
         bail!("Waku Computer Use skill is missing from this Waku build")
     }
     Ok(path)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn skill_root_path() -> anyhow::Result<PathBuf> {
+    bail!("Computer Use is not supported on this platform")
 }
 
 #[cfg(test)]

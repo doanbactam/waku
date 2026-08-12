@@ -1,7 +1,10 @@
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::fs;
+#[cfg(target_os = "macos")]
+use std::ffi::OsString;
+#[cfg(target_os = "macos")]
 use std::os::unix::ffi::OsStringExt as _;
+#[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -134,6 +137,7 @@ pub(super) fn create_process_directory() -> anyhow::Result<PathBuf> {
             directory.display()
         )
     })?;
+    #[cfg(target_os = "macos")]
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).with_context(|| {
         format!(
             "could not secure Computer Use process directory {}",
@@ -144,15 +148,24 @@ pub(super) fn create_process_directory() -> anyhow::Result<PathBuf> {
 }
 
 pub(super) fn stop_registered_processes(directory: &Path, helper_executable: &Path) {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = helper_executable;
+        for (_, registration) in registered_processes(directory) {
+            let _ = fs::remove_file(registration);
+        }
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
     let expected_executable =
         fs::canonicalize(helper_executable).unwrap_or_else(|_| helper_executable.to_path_buf());
     for (pid, registration) in registered_processes(directory) {
         if process_executable(pid).as_deref() == Some(expected_executable.as_path()) {
-            unsafe {
-                libc::kill(pid, libc::SIGTERM);
-            }
+            unsafe { libc::kill(pid, libc::SIGTERM); }
         }
         let _ = fs::remove_file(registration);
+    }
     }
 }
 
@@ -172,7 +185,8 @@ pub(super) fn registered_processes(directory: &Path) -> Vec<(i32, PathBuf)> {
         .collect()
 }
 
-pub(super) fn process_executable(pid: i32) -> Option<PathBuf> {
+#[cfg(target_os = "macos")]
+fn process_executable(pid: i32) -> Option<PathBuf> {
     let mut buffer = vec![0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     let length = unsafe {
         libc::proc_pidpath(
