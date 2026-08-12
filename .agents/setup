@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+step_started=$SECONDS
+step_done() {
+  echo "[setup] $1 ($((SECONDS - step_started))s)"
+  step_started=$SECONDS
+}
+
+echo "[setup] Checking Linux build dependencies"
+packages=(
+  build-essential
+  clang
+  cmake
+  curl
+  elfutils
+  gettext-base
+  git
+  jq
+  libasound2-dev
+  libfontconfig-dev
+  libgit2-dev
+  libglib2.0-dev
+  libsqlite3-dev
+  libssl-dev
+  libstdc++-12-dev
+  libva-dev
+  libvulkan1
+  libwayland-dev
+  libx11-xcb-dev
+  libxkbcommon-x11-dev
+  libzstd-dev
+  lld
+  llvm
+  make
+  musl-dev
+  musl-tools
+  pipewire
+  pkg-config
+  xdg-desktop-portal
+)
+missing_packages=()
+for package in "${packages[@]}"; do
+  if [[ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true)" != "install ok installed" ]]; then
+    missing_packages+=("$package")
+  fi
+done
+if ((${#missing_packages[@]})); then
+  sudo apt-get update
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing_packages[@]}"
+fi
+step_done "Linux build dependencies ready"
+
+profile_marker="# Waku orb toolchains"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >> "$HOME/.bash_profile" <<'EOF'
+
+# Waku orb toolchains
+export PATH="$HOME/.cargo/bin:$HOME/.bun/bin:$PATH"
+EOF
+fi
+export PATH="$HOME/.cargo/bin:$HOME/.bun/bin:$PATH"
+
+echo "[setup] Installing Rust 1.96.0"
+if ! command -v rustup >/dev/null; then
+  curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --default-toolchain none
+fi
+rustup toolchain install 1.96.0 --profile minimal --component rustfmt
+rustup default 1.96.0
+step_done "Rust ready"
+
+echo "[setup] Installing Bun"
+if ! command -v bun >/dev/null; then
+  curl -fsSL https://bun.sh/install | bash
+fi
+step_done "Bun ready"
+
+echo "[setup] Installing JavaScript dependencies"
+bun install --frozen-lockfile
+step_done "JavaScript dependencies ready"
+
+echo "[setup] Fetching Rust dependencies"
+cargo fetch --locked
+step_done "Rust dependencies ready"
+
+echo "[setup] Complete"
