@@ -48,6 +48,12 @@ menu.toggle_fps_counter:
   en: Toggle FPS Counter
 menu.close_window:
   en: Close Window
+window.minimize:
+  en: Minimize window
+window.maximize:
+  en: Maximize window
+window.restore:
+  en: Restore window
 
 updater.update:
   en: Update

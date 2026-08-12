@@ -881,8 +881,13 @@ impl RequestWatchdog {
                 if completion.recv_timeout(remaining).is_ok() {
                     return false;
                 }
+                #[cfg(unix)]
                 let _ = Command::new("/bin/kill")
                     .args(["-TERM", &pid.to_string()])
+                    .status();
+                #[cfg(windows)]
+                let _ = Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
                     .status();
                 true
             })?;

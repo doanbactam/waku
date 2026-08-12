@@ -146,6 +146,16 @@ impl CommandPaletteItem {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn shortcut(macos: &'static str, _: &'static str) -> &'static str {
+    macos
+}
+
+#[cfg(not(target_os = "macos"))]
+fn shortcut(_: &'static str, other: &'static str) -> &'static str {
+    other
+}
+
 struct ScoredPaletteItem {
     score: u32,
     item: CommandPaletteItem,
@@ -528,7 +538,7 @@ impl Waku {
                 display_section(PaletteSection::Suggested),
                 tr!("command_palette.new_task"),
                 "icons/pencil.svg",
-                Some("⌘N"),
+                Some(shortcut("⌘N", "Ctrl+N")),
                 PaletteAction::NewTask,
                 "new task session chat conversation start",
                 next(),
@@ -537,7 +547,7 @@ impl Waku {
                 display_section(PaletteSection::Suggested),
                 tr!("command_palette.open_project"),
                 "icons/folder.svg",
-                Some("⌘O"),
+                Some(shortcut("⌘O", "Ctrl+O")),
                 PaletteAction::OpenProject,
                 "open add folder project workspace repository repo",
                 next(),
@@ -552,7 +562,7 @@ impl Waku {
                 display_section(PaletteSection::Suggested),
                 tr!("command_palette.choose_model"),
                 "icons/bot.svg",
-                Some("⌘/"),
+                Some(shortcut("⌘/", "Ctrl+/")),
                 PaletteAction::ChooseModel,
                 "choose change select model provider agent",
                 next(),
@@ -564,7 +574,7 @@ impl Waku {
                 PaletteSection::Commands,
                 tr!("menu.focus_composer"),
                 "icons/pencil.svg",
-                Some("⌘L"),
+                Some(shortcut("⌘L", "Ctrl+L")),
                 PaletteAction::FocusComposer,
                 "focus composer prompt input message",
                 next(),
@@ -574,7 +584,7 @@ impl Waku {
                     PaletteSection::Commands,
                     tr!("menu.toggle_usage_panel"),
                     "icons/gauge.svg",
-                    Some("⌘U"),
+                    Some(shortcut("⌘U", "Ctrl+U")),
                     PaletteAction::ToggleUsage,
                     "toggle usage limits rate quota panel",
                     next(),
@@ -589,7 +599,7 @@ impl Waku {
                         "command_palette.show_sidebar"
                     }),
                     "icons/panel-left.svg",
-                    Some("⌘B"),
+                    Some(shortcut("⌘B", "Ctrl+B")),
                     PaletteAction::ToggleSidebar,
                     "toggle show hide left sidebar history tasks",
                     next(),
@@ -602,7 +612,7 @@ impl Waku {
                         "command_palette.show_right_panel"
                     }),
                     "icons/panel-right.svg",
-                    Some("⇧⌘B"),
+                    Some(shortcut("⇧⌘B", "Ctrl+Shift+B")),
                     PaletteAction::ToggleRightPanel,
                     "toggle show hide right panel files diff terminal browser",
                     next(),
@@ -655,7 +665,7 @@ impl Waku {
                 PaletteSection::Settings,
                 crate::i18n::translate(label_key),
                 icon,
-                (page == SettingsPage::General).then_some("⌘,"),
+                (page == SettingsPage::General).then_some(shortcut("⌘,", "Ctrl+,")),
                 PaletteAction::OpenSettings(page),
                 keywords,
                 next(),
@@ -1331,6 +1341,7 @@ mod tests {
             .expect("render function must exist");
         let end = source[start..]
             .find("\n}\n\n#[cfg(test)]")
+            .or_else(|| source[start..].find("\r\n}\r\n\r\n#[cfg(test)]"))
             .map(|offset| start + offset)
             .expect("test module marker must exist");
         let render = &source[start..end];

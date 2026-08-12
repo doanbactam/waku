@@ -96,7 +96,8 @@ fn percent_decode_file_path(path: &str) -> String {
 
 fn markdown_file_link_path(target: &str) -> Option<PathBuf> {
     let target = strip_file_location(target.trim());
-    let path = if target.starts_with('/') {
+    let direct = Path::new(target);
+    let path = if direct.is_absolute() {
         target
     } else if let Some(path) = target.strip_prefix("file://") {
         if path.starts_with('/') {
@@ -115,7 +116,13 @@ fn markdown_file_link_path(target: &str) -> Option<PathBuf> {
     } else {
         return None;
     };
-    let path = PathBuf::from(percent_decode_file_path(path));
+    let path = percent_decode_file_path(path);
+    #[cfg(windows)]
+    let path = path
+        .strip_prefix('/')
+        .filter(|path| path.as_bytes().get(1) == Some(&b':'))
+        .unwrap_or(&path);
+    let path = PathBuf::from(path);
     path.is_absolute().then_some(path)
 }
 
@@ -139,7 +146,7 @@ fn workspace_relative_file_path(workspace: &Path, target: &Path) -> Option<Strin
         if relative.as_os_str().is_empty() {
             return None;
         }
-        Some(relative.to_string_lossy().into_owned())
+        Some(relative_path_string(relative))
     }
 
     let workspace = normalized_path(workspace);
@@ -151,6 +158,14 @@ fn workspace_relative_file_path(workspace: &Path, target: &Path) -> Option<Strin
         (Ok(workspace), Ok(target)) => relative(&workspace, &target),
         _ => relative(&workspace, &target),
     }
+}
+
+fn relative_path_string(path: &Path) -> String {
+    let path = path.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    return path.replace('\\', "/");
+    #[cfg(not(windows))]
+    path
 }
 
 fn transcript_link_route(target: &str, workspace: Option<&Path>) -> TranscriptLinkRoute {
@@ -566,7 +581,7 @@ fn visible_working_tree_entries(
             let expanded = is_dir && expanded_paths.contains(&absolute_path);
             let file_icon = (!is_dir).then(|| file_icon_for_name(&name));
             entries.push(WorkingTreeEntry {
-                relative_path: relative_path.to_string_lossy().into_owned(),
+                relative_path: relative_path_string(&relative_path),
                 absolute_path: absolute_path.clone(),
                 name,
                 is_dir,
@@ -897,6 +912,7 @@ fn tab_scroll_fade(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn transcript_file_links_route_by_the_active_workspace() {
         let workspace = Path::new("/Users/egoist/dev/waku");
@@ -932,6 +948,40 @@ mod tests {
         assert_eq!(
             transcript_link_route("https://example.com/file.rs:12", Some(workspace)),
             TranscriptLinkRoute::External
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn transcript_file_links_route_by_the_active_workspace() {
+        let workspace = Path::new(r"C:\Users\egoist\dev\waku");
+
+        assert_eq!(
+            transcript_link_route(
+                r"C:\Users\egoist\dev\waku\src\app\right_panel.rs:1596:8",
+                Some(workspace),
+            ),
+            TranscriptLinkRoute::ProjectFile("src/app/right_panel.rs".into())
+        );
+        assert_eq!(
+            transcript_link_route(
+                "file:///C:/Users/egoist/dev/waku/src/app/right_panel.rs:1596",
+                Some(workspace),
+            ),
+            TranscriptLinkRoute::ProjectFile("src/app/right_panel.rs".into())
+        );
+        assert_eq!(
+            transcript_link_route(r"https://example.com/file.rs:12", Some(workspace)),
+            TranscriptLinkRoute::External
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_path_string_preserves_unix_backslashes() {
+        assert_eq!(
+            relative_path_string(Path::new(r"src\notes.rs")),
+            r"src\notes.rs"
         );
     }
 
@@ -2168,7 +2218,11 @@ impl Waku {
             .items_center()
             .gap(px(6.0))
             .pl(px(10.0))
-            .pr(px(14.0))
+            .pr(px(if cfg!(target_os = "macos") {
+                14.0
+            } else {
+                WINDOW_CONTROLS_WIDTH + 14.0
+            }))
             .child(
                 div()
                     .relative()

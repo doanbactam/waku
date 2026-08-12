@@ -5,9 +5,12 @@ import { watch, type FSWatcher } from "node:fs";
 import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
+const isWindows = process.platform === "win32";
 const appName = "Waku Debug";
 const targetDir = resolve(process.env.CARGO_TARGET_DIR || 'target')
-const appPath = join(targetDir, "debug/Waku Debug.app");
+const appPath = isWindows
+  ? join(targetDir, "debug", "waku.exe")
+  : join(targetDir, "debug/Waku Debug.app");
 const watchedDirectories = ["src", "assets", "resources", "locales"];
 const watchedFiles = ["Cargo.toml", "Cargo.lock", "build.rs"];
 const rebuildDebounceMs = 1_000;
@@ -23,9 +26,19 @@ let rebuildTimer: ReturnType<typeof setTimeout> | undefined;
 const watchers: FSWatcher[] = [];
 
 async function build(): Promise<boolean> {
-  console.log("[waku-dev] Building app bundle...");
-  const result = await $`${join(root, "scripts/bundle.sh")} debug`.nothrow();
-  if (result.exitCode !== 0) {
+  console.log(`[waku-dev] Building ${isWindows ? "Windows executable" : "app bundle"}...`);
+  const buildProcess = isWindows
+    ? Bun.spawn(["cargo", "build", "--bin", "waku", "--jobs", "2"], {
+        cwd: root,
+        stdout: "inherit",
+        stderr: "inherit",
+      })
+    : Bun.spawn([join(root, "scripts/bundle.sh"), "debug"], {
+        cwd: root,
+        stdout: "inherit",
+        stderr: "inherit",
+      });
+  if ((await buildProcess.exited) !== 0) {
     console.error("[waku-dev] Build failed; keeping the current app open.");
     return false;
   }
@@ -35,7 +48,11 @@ async function build(): Promise<boolean> {
 async function stopApp(): Promise<void> {
   const waiter = app;
   app = undefined;
-  await $`pkill -TERM -x ${appName}`.quiet().nothrow();
+  if (isWindows) {
+    waiter?.kill();
+  } else {
+    await $`pkill -TERM -x ${appName}`.quiet().nothrow();
+  }
   if (waiter?.exitCode === null) {
     await waiter.exited;
   }
@@ -43,7 +60,7 @@ async function stopApp(): Promise<void> {
 
 function launchApp(): ReturnType<typeof Bun.spawn> {
   console.log(`[waku-dev] Launching ${appPath}`);
-  const launchedApp = Bun.spawn(["open", "-n", "-W", appPath], {
+  const launchedApp = Bun.spawn(isWindows ? [appPath] : ["open", "-n", "-W", appPath], {
     stdout: "inherit",
     stderr: "inherit",
   });

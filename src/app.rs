@@ -12,10 +12,10 @@ use gpui::{
     Animation, AnimationExt, AnyElement, App, ClipboardEntry, ClipboardItem, Context, Div, Entity,
     ExternalPaths, FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent,
     ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, NavigationDirection, ObjectFit, PathPromptOptions, Pixels, Render, ScrollHandle,
-    SharedString, Stateful, StyleRefinement, TextRun, WeakEntity, Window, canvas, div,
-    ease_out_quint, fill, font, img, linear_color_stop, linear_gradient, list, point, prelude::*,
-    pulsating_between, px, rgb,
+    MouseUpEvent, NavigationDirection, ObjectFit, PathPromptOptions, Pixels, Render, Role,
+    ScrollHandle, SharedString, Stateful, StyleRefinement, TextRun, WeakEntity, Window,
+    WindowControlArea, canvas, div, ease_out_quint, fill, font, img, linear_color_stop,
+    linear_gradient, list, point, prelude::*, pulsating_between, px, rgb,
 };
 use uuid::Uuid;
 
@@ -71,7 +71,8 @@ use crate::{
     ToggleUsagePanel,
 };
 
-const TRAFFIC_LIGHT_CLEARANCE: f32 = 86.0;
+const TRAFFIC_LIGHT_CLEARANCE: f32 = if cfg!(target_os = "macos") { 86.0 } else { 0.0 };
+const WINDOW_CONTROLS_WIDTH: f32 = 138.0;
 const CONTENT_MAX_WIDTH: f32 = 720.0;
 /// Menu-registry id of the composer's model picker, shared by its render site
 /// and the `cmd-/` toggle action.

@@ -371,6 +371,8 @@ impl DriverControl for AmpDriver {
                     .args(["-INT", &pid.to_string()])
                     .status();
             }
+            #[cfg(windows)]
+            crate::command_env::terminate_process_tree(pid);
         }
     }
 

@@ -12,7 +12,9 @@
 //! app entity stores.
 
 use std::io::{BufRead as _, BufReader, Write as _};
-use std::process::{Command, Stdio};
+#[cfg(target_os = "macos")]
+use std::process::Command;
+use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
@@ -21,6 +23,7 @@ use serde_json::{Value, json};
 
 const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const CLAUDE_PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
+#[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 /// The usage endpoint rejects requests without this beta header.
 const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
@@ -535,13 +538,18 @@ pub fn openai_plan_label(plan: Option<&str>) -> Option<String> {
 /// the cross-setup fallback. Claude Code stores the item via `security`, so
 /// `security` is on its ACL and this read does not prompt.
 fn read_credentials() -> anyhow::Result<OauthCredentials> {
+    #[cfg(target_os = "macos")]
     let payload = keychain_payload().or_else(|keychain_error| {
         credentials_file_payload()
             .map_err(|_| keychain_error.context(tr!("usage_error.claude_credentials_missing")))
     })?;
+    #[cfg(not(target_os = "macos"))]
+    let payload =
+        credentials_file_payload().context(tr!("usage_error.claude_credentials_missing"))?;
     parse_credentials(&payload)
 }
 
+#[cfg(target_os = "macos")]
 fn keychain_payload() -> anyhow::Result<String> {
     let output = Command::new("/usr/bin/security")
         .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
@@ -596,7 +604,7 @@ fn parse_credentials(payload: &str) -> anyhow::Result<OauthCredentials> {
 /// on stdin, never on argv, so bearer tokens cannot show up in the process
 /// table. Shared with the usage-history rate-table fetch.
 pub(crate) fn http_get(url: &str, headers: &[String]) -> anyhow::Result<(u16, String)> {
-    let mut child = Command::new("/usr/bin/curl")
+    let mut child = crate::command_env::command("curl")
         .args(["-sS", "--max-time", "15", "-D", "-", "-K", "-", url])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

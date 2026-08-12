@@ -226,7 +226,7 @@ impl Waku {
         region
             .on_click(|event, window, _| {
                 if event.click_count() == 2 {
-                    window.titlebar_double_click();
+                    crate::platform::titlebar_double_click(window);
                 }
             })
             .on_mouse_down_out(cx.listener(|this, _, _, _| {
@@ -1202,14 +1202,20 @@ impl Waku {
             } else {
                 px(0.0)
             })
-            .pr(px(14.0))
+            .pr(px(
+                if !cfg!(target_os = "macos") && !self.right_panel_visible {
+                    WINDOW_CONTROLS_WIDTH + 14.0
+                } else {
+                    14.0
+                },
+            ))
             .when(!self.sidebar_visible, |element| {
                 element
                     .child(
                         self.window_drag_region(
                             div()
                                 .id("header-traffic-light-drag-region")
-                                .w(px(TRAFFIC_LIGHT_CLEARANCE - 8.0))
+                                .w(px((TRAFFIC_LIGHT_CLEARANCE - 8.0).max(0.0)))
                                 .h_full()
                                 .flex_none(),
                             cx,
