@@ -791,6 +791,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("waku-checkpoints-{}", Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
         git_ok(&directory, &["init", "--quiet"]);
+        git_ok(&directory, &["config", "core.autocrlf", "false"]);
         fs::write(directory.join("tracked.txt"), "baseline\n").unwrap();
         git_ok(&directory, &["add", "tracked.txt"]);
         git_ok(
@@ -906,6 +907,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("waku-checkpoints-{}", Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
         git_ok(&directory, &["init", "--quiet"]);
+        git_ok(&directory, &["config", "core.autocrlf", "false"]);
         fs::write(directory.join("tracked.txt"), "baseline\n").unwrap();
         git_ok(&directory, &["add", "tracked.txt"]);
         git_ok(

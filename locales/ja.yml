@@ -24,6 +24,9 @@ menu.toggle_usage_panel: 使用状況パネルの表示を切り替える
 menu.window: ウインドウ
 menu.toggle_fps_counter: FPS カウンターの表示を切り替える
 menu.close_window: ウインドウを閉じる
+window.minimize: ウインドウを最小化
+window.maximize: ウインドウを最大化
+window.restore: ウインドウを元に戻す
 
 updater.update: アップデート
 updater.checking: アップデートを確認中…

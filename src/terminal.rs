@@ -191,9 +191,18 @@ impl TerminalSession {
             proxy.clone(),
         )));
 
+        #[cfg(windows)]
+        let shell = std::env::var("SHELL")
+            .or_else(|_| std::env::var("COMSPEC"))
+            .unwrap_or_else(|_| "powershell.exe".into());
+        #[cfg(unix)]
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+        #[cfg(windows)]
+        let shell_args = Vec::new();
+        #[cfg(unix)]
+        let shell_args = vec!["-l".into()];
         let mut options = tty::Options {
-            shell: Some(Shell::new(shell, vec!["-l".into()])),
+            shell: Some(Shell::new(shell, shell_args)),
             working_directory: Some(working_directory.to_path_buf()),
             drain_on_exit: false,
             ..Default::default()

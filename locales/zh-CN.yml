@@ -24,6 +24,9 @@ menu.toggle_usage_panel: 打开或关闭用量面板
 menu.window: 窗口
 menu.toggle_fps_counter: 显示或隐藏帧率
 menu.close_window: 关闭窗口
+window.minimize: 最小化窗口
+window.maximize: 最大化窗口
+window.restore: 还原窗口
 updater.update: 更新
 updater.checking: 正在检查更新…
 updater.updating: 正在更新…

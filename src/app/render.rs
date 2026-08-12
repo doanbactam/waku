@@ -1,6 +1,62 @@
 use super::*;
 
 impl Waku {
+    fn render_window_controls(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        if cfg!(target_os = "macos") {
+            return None;
+        }
+
+        let theme = Theme::current(cx);
+        let maximized = window.is_maximized();
+        Some(
+            div()
+                .id("window-controls")
+                .absolute()
+                .top_0()
+                .right_0()
+                .h(px(48.0))
+                .flex()
+                .items_center()
+                .occlude()
+                .child(window_control_button(
+                    "window-minimize",
+                    "icons/window-minimize.svg",
+                    tr!("window.minimize"),
+                    WindowControlArea::Min,
+                    WindowControlKind::Minimize,
+                    theme,
+                ))
+                .child(window_control_button(
+                    "window-maximize",
+                    if maximized {
+                        "icons/window-restore.svg"
+                    } else {
+                        "icons/window-maximize.svg"
+                    },
+                    if maximized {
+                        tr!("window.restore")
+                    } else {
+                        tr!("window.maximize")
+                    },
+                    WindowControlArea::Max,
+                    WindowControlKind::Maximize,
+                    theme,
+                ))
+                .child(window_control_button(
+                    "window-close",
+                    "icons/x.svg",
+                    tr!("menu.close_window"),
+                    WindowControlArea::Close,
+                    WindowControlKind::Close,
+                    theme,
+                )),
+        )
+    }
+
     pub(super) fn render_panel_resize_handle(
         &self,
         id: &'static str,
@@ -87,6 +143,7 @@ impl Render for Waku {
                 .size_full()
                 .on_action(cx.listener(Self::toggle_command_palette_action))
                 .child(self.render_settings(cx))
+                .children(self.render_window_controls(window, cx))
                 .children(command_palette)
                 .children(commit_dialog)
                 .children(image_preview)
@@ -202,11 +259,88 @@ impl Render for Waku {
             .when(self.right_panel_visible, |root| {
                 root.child(self.render_right_panel(right_panel_width, window, cx))
             })
+            .children(self.render_window_controls(window, cx))
             .children(command_palette)
             .children(commit_dialog)
             .children(image_preview)
             .into_any_element()
     }
+}
+
+#[derive(Clone, Copy)]
+enum WindowControlKind {
+    Minimize,
+    Maximize,
+    Close,
+}
+
+fn activate_window_control(kind: WindowControlKind, window: &mut Window) {
+    match kind {
+        WindowControlKind::Minimize => window.minimize_window(),
+        WindowControlKind::Maximize => window.zoom_window(),
+        WindowControlKind::Close => crate::platform::hide_window(window),
+    }
+}
+
+fn window_control_button(
+    id: &'static str,
+    icon_path: &'static str,
+    label: String,
+    area: WindowControlArea,
+    kind: WindowControlKind,
+    theme: Theme,
+) -> Stateful<Div> {
+    let close = matches!(kind, WindowControlKind::Close);
+    let close_group = "window-close-control";
+    let button = div()
+        .id(id)
+        .w(px(46.0))
+        .h_full()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_default()
+        .group(close_group)
+        .role(Role::Button)
+        .aria_label(label.clone())
+        .tab_index(0)
+        .window_control_area(area)
+        .tooltip(Tooltip::text(label))
+        .focus_visible(|style| style.border_1().border_color(theme.accent))
+        .hover(move |element| {
+            element.bg(if close {
+                rgb(0xE81123).into()
+            } else {
+                theme.overlay
+            })
+        })
+        .active(move |element| {
+            element.bg(if close {
+                rgb(0xC50F1F).into()
+            } else {
+                theme.overlay_strong
+            })
+        })
+        .child(
+            icon(icon_path, 12.0, theme.text_secondary).when(close, |icon| {
+                icon.group_hover(close_group, |icon| icon.text_color(rgb(0xFFFFFF)))
+            }),
+        )
+        .on_key_down(move |event: &KeyDownEvent, window, cx| {
+            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                activate_window_control(kind, window);
+                cx.stop_propagation();
+            }
+        });
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    let button = button.on_click(move |_, window, cx| {
+        activate_window_control(kind, window);
+        cx.stop_propagation();
+    });
+
+    button
 }
 
 impl Waku {

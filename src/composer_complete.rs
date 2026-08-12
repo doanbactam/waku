@@ -1216,6 +1216,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlinked_skills_and_command_dirs_are_discovered() {
         let root = std::env::temp_dir().join(format!("waku-symlink-{}", std::process::id()));

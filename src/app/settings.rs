@@ -111,6 +111,7 @@ impl Waku {
             .on_action(cx.listener(Self::cancel_turn_action))
             .capture_any_mouse_down(cx.listener(Self::navigation_mouse_down))
             .size_full()
+            .relative()
             .flex()
             .bg(theme.canvas)
             .text_color(theme.text)
@@ -291,6 +292,7 @@ impl Waku {
                 .border_l_1()
                 .border_color(theme.sidebar_border)
                 .bg(theme.surface)
+                .pt(px(48.0))
                 .child(self.render_skills_settings(cx));
         }
         // The Monthly and Projects list views own their own scrolling, so
@@ -1533,7 +1535,7 @@ impl Waku {
             .flex_none()
             .on_click(|event, window, _| {
                 if event.click_count() == 2 {
-                    window.titlebar_double_click();
+                    crate::platform::titlebar_double_click(window);
                 }
             })
             .on_mouse_down_out(cx.listener(|this, _, _, _| {

@@ -236,6 +236,8 @@ impl OpenCodeServer {
                 .args(["-TERM", &self.pid.to_string()])
                 .status();
         }
+        #[cfg(windows)]
+        crate::command_env::terminate_process_tree(self.pid);
     }
 }
 

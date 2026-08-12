@@ -171,7 +171,14 @@ pub fn reveal_in_finder(path: &std::path::Path) {
         .activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[url]));
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+pub fn reveal_in_finder(path: &std::path::Path) {
+    let _ = std::process::Command::new("explorer.exe")
+        .arg(format!("/select,{}", path.display()))
+        .spawn();
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn reveal_in_finder(_: &std::path::Path) {}
 
 /// Open `path` with its default application — a document in its editor.
@@ -184,7 +191,12 @@ pub fn open_with_default_app(path: &std::path::Path) {
     NSWorkspace::sharedWorkspace().openURL(&url);
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+pub fn open_with_default_app(path: &std::path::Path) {
+    let _ = std::process::Command::new("explorer.exe").arg(path).spawn();
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn open_with_default_app(_: &std::path::Path) {}
 
 /// Move `path` to the Trash, recoverably. Errors surface to the caller so the
@@ -200,8 +212,8 @@ pub fn trash_item(path: &std::path::Path) -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn trash_item(path: &std::path::Path) -> Result<(), String> {
-    std::fs::remove_dir_all(path).map_err(|error| error.to_string())
+pub fn trash_item(_: &std::path::Path) -> Result<(), String> {
+    Err("Moving items to the Trash is not implemented on this platform".into())
 }
 
 /// Keep Waku's single main window alive when the user closes it. This preserves
@@ -259,6 +271,13 @@ const SIDEBAR_WIDTH: f64 = 252.0;
 
 pub fn start_window_move(window: &Window) {
     window.start_window_move();
+}
+
+pub fn titlebar_double_click(window: &Window) {
+    #[cfg(target_os = "macos")]
+    window.titlebar_double_click();
+    #[cfg(not(target_os = "macos"))]
+    window.zoom_window();
 }
 
 /// Match Cursor's macOS glass window stack without asking GPUI's transparent
