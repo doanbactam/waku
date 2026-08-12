@@ -198,12 +198,17 @@ fn sdk_agent(
     let (computer_args, computer_env) =
         super::support::grok_computer_use_launch_configuration(computer_use);
     launch.args.extend(computer_args);
-    launch.env.extend(computer_env);
-    if let Some(path) = crate::command_env::executable_search_path() {
-        launch
-            .env
-            .push(("PATH".into(), path.to_string_lossy().into_owned()));
-    }
+    let mut environment = crate::command_env::shell_environment()
+        .into_iter()
+        .map(|(name, value)| {
+            (
+                name.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    environment.append(&mut launch.env);
+    environment.extend(computer_env);
 
     // `AcpAgentConfig` deliberately contains only argv and environment. Unix
     // `env -C` supplies the process cwd without a shell, preserving exact
@@ -217,7 +222,7 @@ fn sdk_agent(
         args.extend(launch.args);
         AcpAgentConfig::new("/usr/bin/env")
             .args(args)
-            .envs(launch.env)
+            .envs(environment)
     };
 
     // ACP carries the workspace cwd in `session/new`; the SDK has no process
@@ -228,7 +233,7 @@ fn sdk_agent(
         let _ = cwd;
         AcpAgentConfig::new(binary)
             .args(launch.args)
-            .envs(launch.env)
+            .envs(environment)
     };
     Ok(AcpAgent::new(config).with_debug(move |line, direction| {
         if direction != LineDirection::Stderr || line.trim().is_empty() {

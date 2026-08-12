@@ -2394,14 +2394,11 @@ impl Waku {
             // The autocomplete indexes prefetch alongside, so typing `/` or
             // `@` into the very first prompt already has data to draw.
             this.refresh_composer_sources(cx);
-            // Model discovery for every installed provider also starts here,
-            // ahead of the model picker's first render, so opening it never
-            // waits on a per-provider lazy load.
-            this.request_all_model_discoveries();
-            // CLI versions prefetch alongside for the same reason: the
-            // Providers settings page reads only this store and must never
-            // open onto a lazy load.
-            this.request_provider_version_probes();
+            // Re-detect providers after resolving the user's login-shell
+            // environment off-thread. Detection then starts model and version
+            // discovery for every CLI it finds, including nvm/fnm-managed
+            // installs.
+            this.refresh_provider_detection(None);
             // The skill library too: the Skills settings page must open onto
             // data, not a scan.
             this.ensure_skills_catalog(false, cx);
