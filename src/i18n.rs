@@ -94,7 +94,9 @@ fn system_locale() -> String {
         .unwrap_or_else(|| "en".to_owned())
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Linux reads the POSIX locale env vars, which the desktop environment sets
+/// at login. FreeBSD and other Unixes do the same.
+#[cfg(all(unix, not(target_os = "macos")))]
 fn system_locale() -> String {
     std::env::var("LC_ALL")
         .or_else(|_| std::env::var("LC_MESSAGES"))
@@ -104,6 +106,30 @@ fn system_locale() -> String {
         .next()
         .unwrap_or("en")
         .to_owned()
+}
+
+/// Windows doesn't set POSIX locale env vars. Query the user's culture via
+/// PowerShell — a one-shot startup call, not per-frame, so the subprocess is
+/// acceptable. Falls back to "en" if PowerShell is unavailable.
+#[cfg(target_os = "windows")]
+fn system_locale() -> String {
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command"])
+        .arg("(Get-Culture).Name")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            let locale = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            if locale.is_empty() {
+                "en".to_owned()
+            } else {
+                locale
+            }
+        }
+        _ => "en".to_owned(),
+    }
 }
 
 #[cfg(test)]

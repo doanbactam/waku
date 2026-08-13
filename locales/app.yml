@@ -1217,8 +1217,8 @@ browser.start_hint:
   en: Enter a URL or search above — ⌘L focuses the address bar
 browser.unavailable:
   en: Browser unavailable
-browser.requires_macos:
-  en: The browser surface requires macOS
+browser.unsupported_platform:
+  en: The browser surface is not yet supported on this platform
 
 find.bad_pattern:
   en: Bad pattern

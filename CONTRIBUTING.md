@@ -7,10 +7,25 @@ well-scoped features are welcome.
 
 The debug app currently requires:
 
-- macOS
 - Rust 1.96 or newer
 - Bun
 - A supported agent CLI when testing a provider integration
+
+macOS is the canonical development platform. Linux and Windows also build:
+
+- **Linux**: install native deps via `.agents/setup` (Wayland/X11, freetype,
+  fontconfig, openssl, webkit2gtk, gtk3). `bun run dev` builds
+  `target/debug/waku` and launches it directly (no `.app` bundle).
+- **Windows**: install the MSVC toolchain and run `bun run dev`, which builds
+  `target/debug/waku.exe`.
+
+Some macOS-native surfaces are gated off on Linux/Windows today: the Linux
+browser (GPUI/wry handle mismatch), the Computer Use native accessibility
+backend (needs AT-SPI on Linux, UI Automation on Windows), and the Sparkle
+updater. The Windows browser (WebView2) and Computer Use portable resources
+(REPL, Pi extension, skills) build cross-platform; see
+[Platform support](../README.md#platform-support) and
+[docs/cross-platform.md](docs/cross-platform.md).
 
 Install dependencies and start the development watcher from the repository
 root:
@@ -20,10 +35,10 @@ bun install
 bun run dev
 ```
 
-The watcher builds and signs `target/debug/Waku Debug.app`, launches it, and
-rebuilds and relaunches it after source changes. Keep that watcher running while
-you work. Do not start a second watcher or manually relaunch the debug app.
-Press `Ctrl-C`, or quit the app, to stop it.
+The watcher builds, launches, and rebuilds after source changes. On macOS it
+produces a signed `Waku Debug.app`; on Linux and Windows a plain cargo binary.
+Keep that watcher running while you work. Do not start a second watcher or
+manually relaunch the debug binary. Press `Ctrl-C`, or quit the app, to stop it.
 
 ## Making changes
 

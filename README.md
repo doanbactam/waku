@@ -32,16 +32,44 @@ structured protocol and session continuity.
 
 ## Development
 
-Development currently requires macOS, [Rust 1.96 or newer](https://www.rust-lang.org/tools/install),
-and [Bun](https://bun.sh/).
+Development requires [Rust 1.96 or newer](https://www.rust-lang.org/tools/install)
+and [Bun](https://bun.sh/). macOS is the canonical development platform; Linux
+and Windows also build and run, with some macOS-only surfaces gated off (see
+[Platform support](#platform-support)).
 
 ```sh
 bun install
 bun run dev
 ```
 
+On macOS the watcher builds and signs a `Waku Debug.app` bundle via
+`scripts/bundle.sh`. On Linux and Windows it builds a plain cargo binary
+(`target/debug/waku` or `waku.exe`) and launches it directly.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and checks.
 Release maintainers should also read [RELEASING.md](RELEASING.md).
+
+## Platform support
+
+Waku's native surfaces have different maturity per platform:
+
+| Surface | macOS | Linux | Windows |
+| --- | :---: | :---: | :---: |
+| App shell (window, sidebar, transcript, composer) | ✅ | ✅ builds, runs | ✅ builds |
+| Browser surface (right panel) | ✅ | gated off (1) | ✅ builds (WebView2) |
+| Computer Use (resources, REPL, skills) | ✅ | ✅ builds | ✅ builds |
+| Computer Use (native accessibility backend) | ✅ | not yet (AT-SPI) | not yet (UI Automation) |
+| In-app updater (Sparkle) | ✅ | not yet | not yet (WinSparkle planned) |
+| Packaging | `.app` | `.desktop` + binary | portable `.exe` (MSI via WiX) |
+
+`cargo check` and `cargo test` pass on Linux; the Windows cfg arms are
+cross-checked from Linux with `mingw-w64` (`x86_64-pc-windows-gnu`). Runtime
+validation on Linux and Windows requires a real desktop (the development orb
+is headless).
+
+1. Linux browser is gated off because GPUI exposes Xcb/Wayland window handles
+   and wry's child-webview path needs Xlib or a GTK container. See
+   [docs/cross-platform.md](docs/cross-platform.md) for details.
 
 ## Sponsorship
 

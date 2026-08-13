@@ -1,7 +1,7 @@
 use std::collections::HashMap;
-use std::fs;
 #[cfg(target_os = "macos")]
 use std::ffi::OsString;
+use std::fs;
 #[cfg(target_os = "macos")]
 use std::os::unix::ffi::OsStringExt as _;
 #[cfg(target_os = "macos")]
@@ -148,24 +148,25 @@ pub(super) fn create_process_directory() -> anyhow::Result<PathBuf> {
 }
 
 pub(super) fn stop_registered_processes(directory: &Path, helper_executable: &Path) {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(unix)]
+    {
+        let expected_executable =
+            fs::canonicalize(helper_executable).unwrap_or_else(|_| helper_executable.to_path_buf());
+        for (pid, registration) in registered_processes(directory) {
+            if process_executable(pid).as_deref() == Some(expected_executable.as_path()) {
+                unsafe {
+                    libc::kill(pid, libc::SIGTERM);
+                }
+            }
+            let _ = fs::remove_file(registration);
+        }
+    }
+    #[cfg(not(unix))]
     {
         let _ = helper_executable;
         for (_, registration) in registered_processes(directory) {
             let _ = fs::remove_file(registration);
         }
-        return;
-    }
-    #[cfg(target_os = "macos")]
-    {
-    let expected_executable =
-        fs::canonicalize(helper_executable).unwrap_or_else(|_| helper_executable.to_path_buf());
-    for (pid, registration) in registered_processes(directory) {
-        if process_executable(pid).as_deref() == Some(expected_executable.as_path()) {
-            unsafe { libc::kill(pid, libc::SIGTERM); }
-        }
-        let _ = fs::remove_file(registration);
-    }
     }
 }
 
@@ -186,7 +187,7 @@ pub(super) fn registered_processes(directory: &Path) -> Vec<(i32, PathBuf)> {
 }
 
 #[cfg(target_os = "macos")]
-fn process_executable(pid: i32) -> Option<PathBuf> {
+pub(super) fn process_executable(pid: i32) -> Option<PathBuf> {
     let mut buffer = vec![0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     let length = unsafe {
         libc::proc_pidpath(
@@ -200,4 +201,11 @@ fn process_executable(pid: i32) -> Option<PathBuf> {
     }
     buffer.truncate(length as usize);
     Some(PathBuf::from(OsString::from_vec(buffer)))
+}
+
+/// Linux exposes the executable path as a symlink at `/proc/{pid}/exe`.
+/// readlink resolves it without spawning a subprocess.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(super) fn process_executable(pid: i32) -> Option<PathBuf> {
+    fs::read_link(format!("/proc/{pid}/exe")).ok()
 }

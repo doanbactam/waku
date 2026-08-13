@@ -72,7 +72,41 @@ pub fn reduce_motion_enabled() -> bool {
     NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
 }
 
-#[cfg(not(target_os = "macos"))]
+/// GNOME exposes a reduce-animation gsetting; other Linux desktops do not share
+/// a common flag, so the probe degrades to `false` off GNOME. Windows does not
+/// yet have an implementation here.
+#[cfg(target_os = "linux")]
+pub fn reduce_motion_enabled() -> bool {
+    std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.interface", "reduce-animation"])
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .is_some_and(|value| value.trim() == "true")
+}
+
+/// Windows: `SystemParametersInfo(SPI_GETCLIENTAREAANIMATION)` reflects the
+/// "Show animations in Windows" toggle. We read it via PowerShell so no
+/// native linking is needed; missing PowerShell degrades to `false`.
+#[cfg(target_os = "windows")]
+pub fn reduce_motion_enabled() -> bool {
+    let script = concat!(
+        "Add-Type -TypeDefinition '",
+        "using System; using System.Runtime.InteropServices;",
+        "public class W {",
+        "[DllImport(\\\"user32.dll\\\")] public static extern bool SystemParametersInfo(int u,int p,ref bool v,int f);",
+        "};'",
+        "$v=$true; [W]::SystemParametersInfo(0x1042,0,[ref]$v,0); $v"
+    );
+    std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .is_some_and(|value| value.trim() == "False")
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 pub fn reduce_motion_enabled() -> bool {
     false
 }
@@ -126,7 +160,37 @@ pub fn show_task_notification(tag: &str, title: &str, body: &str) {
         );
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Best-effort Linux desktop notification via `notify-send` (libnotify). The
+/// binary is optional, so a missing command degrades silently. Unlike macOS,
+/// there is no click-to-open-task callback yet — the tag is unused here.
+#[cfg(target_os = "linux")]
+pub fn show_task_notification(_tag: &str, title: &str, body: &str) {
+    let _ = std::process::Command::new("notify-send")
+        .args(["--app-name", "Waku", title, body])
+        .spawn();
+}
+
+/// Windows toast via PowerShell + WinRT `Windows.UI.Notifications`. The XML
+/// template is the generic toast; a missing `powershell` or disabled notifications
+/// degrades silently. No click-to-open-task callback yet.
+#[cfg(target_os = "windows")]
+pub fn show_task_notification(_tag: &str, title: &str, body: &str) {
+    let title_ps = title.replace('\'', "''");
+    let body_ps = body.replace('\'', "''");
+    let script = format!(
+        "[Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime] | Out-Null; \
+         $t = [Windows.UI.Notifications.ToastNotificationManager]::GetToastTextTemplate(1); \
+         $t.GetElementsByTagName('text')[0].AppendChild($t.CreateTextNode('{title_ps}')) | Out-Null; \
+         $t.GetElementsByTagName('text')[1].AppendChild($t.CreateTextNode('{body_ps}')) | Out-Null; \
+         $n = [Windows.UI.Notifications.ToastNotification]::new($t); \
+         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Waku').Show($n)"
+    );
+    let _ = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .spawn();
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 pub fn show_task_notification(_: &str, _: &str, _: &str) {}
 
 #[cfg(target_os = "macos")]
@@ -178,7 +242,21 @@ pub fn reveal_in_finder(path: &std::path::Path) {
         .spawn();
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(target_os = "linux")]
+pub fn reveal_in_finder(path: &std::path::Path) {
+    // Linux has no cross-desktop "select file in manager" verb, so open the
+    // containing directory via `xdg-open`; a directory opens itself.
+    let target = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| path.to_path_buf())
+    };
+    let _ = std::process::Command::new("xdg-open").arg(target).spawn();
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 pub fn reveal_in_finder(_: &std::path::Path) {}
 
 /// Open `path` with its default application — a document in its editor.
@@ -196,7 +274,12 @@ pub fn open_with_default_app(path: &std::path::Path) {
     let _ = std::process::Command::new("explorer.exe").arg(path).spawn();
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(target_os = "linux")]
+pub fn open_with_default_app(path: &std::path::Path) {
+    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 pub fn open_with_default_app(_: &std::path::Path) {}
 
 /// Move `path` to the Trash, recoverably. Errors surface to the caller so the
@@ -211,7 +294,53 @@ pub fn trash_item(path: &std::path::Path) -> Result<(), String> {
         .map_err(|error| error.localizedDescription().to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+/// FreeDesktop trash via `gio trash` (gvfs). Present on GNOME/KDE/XFCE; on a
+/// minimal system without gvfs the command is missing and the error surfaces.
+#[cfg(target_os = "linux")]
+pub fn trash_item(path: &std::path::Path) -> Result<(), String> {
+    let status = std::process::Command::new("gio")
+        .arg("trash")
+        .arg(path)
+        .status()
+        .map_err(|error| format!("could not run `gio trash`: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "`gio trash` exited with {}",
+            status.code().unwrap_or(-1)
+        ))
+    }
+}
+
+/// Windows Recycle Bin via PowerShell's `Microsoft.VisualBasic.FileIO`
+/// namespace, which is present on every stock Windows install and performs a
+/// real recycle (not a delete). The shell command is quoted defensively.
+#[cfg(target_os = "windows")]
+pub fn trash_item(path: &std::path::Path) -> Result<(), String> {
+    let path_str = path.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "Add-Type -AssemblyName Microsoft.VisualBasic; \
+         [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(\
+           '{path_str}',\
+           'OnlyErrorDialogs',\
+           'SendToRecycleBin')"
+    );
+    let status = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .status()
+        .map_err(|error| format!("could not run powershell: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "recycle failed with exit code {}",
+            status.code().unwrap_or(-1)
+        ))
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 pub fn trash_item(_: &std::path::Path) -> Result<(), String> {
     Err("Moving items to the Trash is not implemented on this platform".into())
 }

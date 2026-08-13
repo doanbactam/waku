@@ -334,7 +334,7 @@ fn window_control_button(
             }
         });
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg(not(target_os = "macos"))]
     let button = button.on_click(move |_, window, cx| {
         activate_window_control(kind, window);
         cx.stop_propagation();

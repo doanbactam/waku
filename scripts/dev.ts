@@ -5,12 +5,17 @@ import { watch, type FSWatcher } from "node:fs";
 import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
+const isMac = process.platform === "darwin";
 const isWindows = process.platform === "win32";
 const appName = "Waku Debug";
 const targetDir = resolve(process.env.CARGO_TARGET_DIR || 'target')
+// macOS ships an .app bundle built by scripts/bundle.sh; Windows and Linux
+// launch a plain cargo-built binary.
 const appPath = isWindows
   ? join(targetDir, "debug", "waku.exe")
-  : join(targetDir, "debug/Waku Debug.app");
+  : isMac
+    ? join(targetDir, "debug/Waku Debug.app")
+    : join(targetDir, "debug", "waku");
 const watchedDirectories = ["src", "assets", "resources", "locales"];
 const watchedFiles = ["Cargo.toml", "Cargo.lock", "build.rs"];
 const rebuildDebounceMs = 1_000;
@@ -26,14 +31,17 @@ let rebuildTimer: ReturnType<typeof setTimeout> | undefined;
 const watchers: FSWatcher[] = [];
 
 async function build(): Promise<boolean> {
-  console.log(`[waku-dev] Building ${isWindows ? "Windows executable" : "app bundle"}...`);
-  const buildProcess = isWindows
-    ? Bun.spawn(["cargo", "build", "--bin", "waku", "--jobs", "2"], {
+  const target = isMac ? "app bundle" : isWindows ? "Windows executable" : "Linux executable";
+  console.log(`[waku-dev] Building ${target}...`);
+  // Only macOS needs scripts/bundle.sh (codesign, Sparkle, Swift helper, .app).
+  // Windows and Linux build a plain binary with cargo.
+  const buildProcess = isMac
+    ? Bun.spawn([join(root, "scripts/bundle.sh"), "debug"], {
         cwd: root,
         stdout: "inherit",
         stderr: "inherit",
       })
-    : Bun.spawn([join(root, "scripts/bundle.sh"), "debug"], {
+    : Bun.spawn(["cargo", "build", "--bin", "waku", "--jobs", "2"], {
         cwd: root,
         stdout: "inherit",
         stderr: "inherit",
@@ -48,10 +56,12 @@ async function build(): Promise<boolean> {
 async function stopApp(): Promise<void> {
   const waiter = app;
   app = undefined;
-  if (isWindows) {
-    waiter?.kill();
-  } else {
+  if (isMac) {
     await $`pkill -TERM -x ${appName}`.quiet().nothrow();
+  } else {
+    // Windows and Linux both launch a plain binary we spawned directly, so
+    // killing the spawned process is enough (no .app to pkill by name).
+    waiter?.kill();
   }
   if (waiter?.exitCode === null) {
     await waiter.exited;
@@ -60,7 +70,7 @@ async function stopApp(): Promise<void> {
 
 function launchApp(): ReturnType<typeof Bun.spawn> {
   console.log(`[waku-dev] Launching ${appPath}`);
-  const launchedApp = Bun.spawn(isWindows ? [appPath] : ["open", "-n", "-W", appPath], {
+  const launchedApp = Bun.spawn(isMac ? ["open", "-n", "-W", appPath] : [appPath], {
     stdout: "inherit",
     stderr: "inherit",
   });

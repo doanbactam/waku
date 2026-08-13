@@ -209,9 +209,13 @@ pub fn probe_permissions(prompt: bool) -> anyhow::Result<ComputerPermissions> {
     Ok(response.permissions.unwrap_or_default())
 }
 
+/// Computer Use's native accessibility/capture backend is macOS-only today.
+/// Windows needs a UI Automation + Win32 input/capture backend, and Linux
+/// needs AT-SPI + desktop capture (Wayland portals complicate this). See
+/// docs/cross-platform.md for the implementation seams.
 #[cfg(not(target_os = "macos"))]
 pub fn probe_permissions(_prompt: bool) -> anyhow::Result<ComputerPermissions> {
-    bail!("Computer Use is not supported on this platform")
+    bail!("Computer Use's native accessibility backend is not yet supported on this platform")
 }
 
 #[cfg(target_os = "macos")]
@@ -297,9 +301,13 @@ pub fn mcp_server_command() -> anyhow::Result<PathBuf> {
     Ok(helper.join("Contents").join("MacOS").join(executable))
 }
 
+/// The MCP server is the native accessibility/capture helper, which is
+/// macOS-only today. A Windows (UI Automation) or Linux (AT-SPI) backend
+/// would replace this; the portable resources (REPL, Pi extension, skills)
+/// are resolved separately and do not require this function.
 #[cfg(not(target_os = "macos"))]
 pub fn mcp_server_command() -> anyhow::Result<PathBuf> {
-    bail!("Computer Use is not supported on this platform")
+    bail!("Computer Use's native accessibility backend is not yet supported on this platform")
 }
 
 #[cfg(target_os = "macos")]
@@ -318,9 +326,25 @@ pub fn js_repl_server_path() -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
+/// On Linux and Windows the REPL ships as a sibling binary next to the main
+/// executable (the bundle scripts copy it into the same directory). The
+/// resource itself is portable; only the bundle layout differs from macOS.
 #[cfg(not(target_os = "macos"))]
 pub fn js_repl_server_path() -> anyhow::Result<PathBuf> {
-    bail!("Computer Use is not supported on this platform")
+    let executable = std::env::current_exe().context("Waku executable path is unavailable")?;
+    let dir = executable
+        .parent()
+        .ok_or_else(|| anyhow!("Waku executable has no parent directory"))?;
+    let name = if cfg!(target_os = "windows") {
+        "waku_js_repl.exe"
+    } else {
+        "waku_js_repl"
+    };
+    let path = dir.join(name);
+    if !path.is_file() {
+        bail!("Waku JavaScript REPL is missing from this Waku build")
+    }
+    Ok(path)
 }
 
 #[cfg(target_os = "macos")]
@@ -342,9 +366,23 @@ pub fn pi_extension_path() -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
+/// On Linux and Windows the Pi extension ships under a `resources/`
+/// directory next to the main executable. The extension itself is portable
+/// TypeScript; only the bundle layout differs from macOS.
 #[cfg(not(target_os = "macos"))]
 pub fn pi_extension_path() -> anyhow::Result<PathBuf> {
-    bail!("Computer Use is not supported on this platform")
+    let executable = std::env::current_exe().context("Waku executable path is unavailable")?;
+    let dir = executable
+        .parent()
+        .ok_or_else(|| anyhow!("Waku executable has no parent directory"))?;
+    let path = dir
+        .join("resources")
+        .join("computer-use")
+        .join("pi-extension.ts");
+    if !path.is_file() {
+        bail!("Waku Pi Computer Use extension is missing from this Waku build")
+    }
+    Ok(path)
 }
 
 /// Install the bundled helper as an independent, stable runtime service.
@@ -456,9 +494,20 @@ pub fn skill_root_path() -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
+/// On Linux and Windows the skills ship under a `resources/` directory
+/// next to the main executable, mirroring the macOS `Contents/Resources`
+/// layout.
 #[cfg(not(target_os = "macos"))]
 pub fn skill_root_path() -> anyhow::Result<PathBuf> {
-    bail!("Computer Use is not supported on this platform")
+    let executable = std::env::current_exe().context("Waku executable path is unavailable")?;
+    let dir = executable
+        .parent()
+        .ok_or_else(|| anyhow!("Waku executable has no parent directory"))?;
+    let path = dir.join("resources").join("skills");
+    if !path.join("waku-computer-use").join("SKILL.md").is_file() {
+        bail!("Waku Computer Use skill is missing from this Waku build")
+    }
+    Ok(path)
 }
 
 #[cfg(test)]
