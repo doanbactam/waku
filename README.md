@@ -49,6 +49,12 @@ On macOS the watcher builds and signs a `Waku Debug.app` bundle via
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and checks.
 Release maintainers should also read [RELEASING.md](RELEASING.md).
 
+Debug builds use the app name `Waku Debug`, bundle identifier `sh.waku.dev`,
+and keep `app.db`, `state.json`, and `settings.json` in the checkout's ignored
+`temp/` directory. Release builds use `Waku`, bundle identifier `sh.waku`, keep
+app-managed data in the `Waku` Application Support directory, and read the
+user-editable settings file from `~/.waku/settings.json`.
+
 ## Platform support
 
 Waku's native surfaces have different maturity per platform:
