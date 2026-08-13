@@ -1,5 +1,6 @@
 use chrono::{DateTime, Datelike, Days, Local, NaiveDate, Utc};
 use gpui::{KeyBinding, actions};
+use std::collections::HashSet;
 
 use super::*;
 
@@ -26,6 +27,12 @@ pub(super) enum SessionDateGroup {
     ThisMonth,
     ThisYear,
     More,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SidebarProjectFilter {
+    Project(Uuid),
+    Projectless,
 }
 
 impl SessionDateGroup {
@@ -86,11 +93,16 @@ fn session_date_group_for_dates(session_date: NaiveDate, today: NaiveDate) -> Se
         return SessionDateGroup::ThisWeek;
     }
 
-    if session_date.year() == today.year() && session_date.month() == today.month() {
+    let month_start = today.with_day(1).unwrap_or(today);
+    if session_date >= month_start {
         return SessionDateGroup::ThisMonth;
     }
 
-    if session_date.year() == today.year() {
+    let year_start = today
+        .with_month(1)
+        .and_then(|date| date.with_day(1))
+        .unwrap_or(today);
+    if session_date >= year_start {
         return SessionDateGroup::ThisYear;
     }
 
@@ -163,7 +175,6 @@ const SIDEBAR_SESSION_CARD_HEIGHT: f32 = 51.0;
 const SIDEBAR_SESSION_ROW_GAP: f32 = 1.0;
 const SIDEBAR_SESSION_ROW_HEIGHT: f32 = SIDEBAR_SESSION_CARD_HEIGHT + SIDEBAR_SESSION_ROW_GAP;
 const SIDEBAR_ACTION_ROW_HEIGHT: f32 = 32.0;
-const SIDEBAR_SEARCH_BOTTOM_GAP: f32 = 10.0;
 
 /// The session row's trailing time: how long the live turn has been working,
 /// or how long ago the agent last replied. A session that has never replied
@@ -192,6 +203,31 @@ fn sidebar_session_timestamp(session: &AgentSession) -> u64 {
     session.last_reply_at.unwrap_or(session.created_at)
 }
 
+fn sidebar_session_matches_project_filter(
+    session: &AgentSession,
+    project_filter: Option<SidebarProjectFilter>,
+    projectless_project_ids: &HashSet<Uuid>,
+) -> bool {
+    if !session.has_started() {
+        return false;
+    }
+    match project_filter {
+        None => true,
+        Some(SidebarProjectFilter::Project(project_id)) => session.project_id == project_id,
+        Some(SidebarProjectFilter::Projectless) => {
+            projectless_project_ids.contains(&session.project_id)
+        }
+    }
+}
+
+fn collect_projectless_project_ids(projects: &[Project]) -> HashSet<Uuid> {
+    projects
+        .iter()
+        .filter(|project| project.is_projectless())
+        .map(|project| project.id)
+        .collect()
+}
+
 /// Compact "how long ago" for the sidebar: "just now", then one coarse unit —
 /// "5m", "3h", "420d". Days are the largest unit so a glance still reads as a
 /// count rather than a date.
@@ -207,14 +243,14 @@ pub(super) fn format_time_ago(seconds: u64) -> String {
 /// One row of the virtualized sidebar session history.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SidebarRow {
-    /// Opens the window-wide command palette and scrolls with history.
-    Search,
-    /// Date-group header; the first row also carries the project action.
+    /// Date-group header. Groups sort history; they never filter it.
     Header(SessionDateGroup),
     /// A started session.
     Session(Uuid),
     /// Spacing between date groups.
     GroupSpacer,
+    /// History exists, but the project scope hides every task.
+    EmptyFilter,
 }
 
 impl Waku {
@@ -224,6 +260,7 @@ impl Waku {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         region
+            .window_control_area(WindowControlArea::Drag)
             .on_click(|event, window, _| {
                 if event.click_count() == 2 {
                     crate::platform::titlebar_double_click(window);
@@ -391,23 +428,29 @@ impl Waku {
             ))
     }
 
-    fn render_sidebar_project_action(&self, cx: &mut Context<Self>) -> Div {
+    fn render_sidebar_project_action(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let theme = Theme::current(cx);
-        div().flex().items_center().child(
-            div()
-                .id("add-project")
-                .w(px(20.0))
-                .h(px(20.0))
-                .rounded(px(6.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_default()
-                .hover(|element| element.bg(theme.overlay))
-                .active(|element| element.bg(theme.overlay_strong))
-                .child(icon("icons/folder-new.svg", 15.0, theme.text_ghost))
-                .on_click(cx.listener(|this, _, _, cx| this.add_project(cx))),
-        )
+        div()
+            .id("add-project")
+            .w(px(26.0))
+            .h(px(26.0))
+            .flex_none()
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_default()
+            .hover(|element| element.bg(theme.overlay))
+            .active(|element| element.bg(theme.overlay_strong))
+            .tooltip(Tooltip::text(tr_cow!("project.new_project")))
+            .child(icon("icons/folder-new.svg", 14.0, theme.text_tertiary))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.add_project(cx);
+            }))
     }
 
     fn render_sidebar_action_row(
@@ -452,6 +495,182 @@ impl Waku {
             )
     }
 
+    fn render_sidebar_chrome(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex_none()
+            .w_full()
+            .px(px(10.0))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(self.render_sidebar_project_filter(cx))
+            .child(self.render_sidebar_new_session(cx))
+            .child(self.render_sidebar_search(cx))
+            .pb(px(8.0))
+    }
+
+    fn sidebar_project_filter_label(&self) -> String {
+        match self.resolved_sidebar_project_filter() {
+            None => tr!("sidebar.all_projects"),
+            Some(SidebarProjectFilter::Project(project_id)) => self
+                .state
+                .projects
+                .iter()
+                .find(|project| project.id == project_id)
+                .map(Project::display_name)
+                .unwrap_or_else(|| tr!("sidebar.all_projects")),
+            Some(SidebarProjectFilter::Projectless) => tr!("project.no_project_name"),
+        }
+    }
+
+    fn resolved_sidebar_project_filter(&self) -> Option<SidebarProjectFilter> {
+        match self.sidebar_project_filter {
+            Some(SidebarProjectFilter::Project(project_id)) => self
+                .state
+                .projects
+                .iter()
+                .any(|project| project.id == project_id && !project.is_projectless())
+                .then_some(SidebarProjectFilter::Project(project_id)),
+            Some(SidebarProjectFilter::Projectless) => self
+                .state
+                .projects
+                .iter()
+                .any(Project::is_projectless)
+                .then_some(SidebarProjectFilter::Projectless),
+            None => None,
+        }
+    }
+
+    fn render_sidebar_project_filter(&self, cx: &mut Context<Self>) -> Div {
+        let theme = Theme::current(cx);
+        let scoped = self.resolved_sidebar_project_filter().is_some();
+        let handle = self.menu_handle("sidebar-project-filter", cx);
+        let weak = cx.entity().downgrade();
+        let trigger = div()
+            .id("sidebar-project-filter")
+            .min_w_0()
+            .h(px(SIDEBAR_ACTION_ROW_HEIGHT))
+            .flex_1()
+            .px(px(4.0))
+            .rounded(px(7.0))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .cursor_default()
+            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .hover(|element| element.bg(theme.sidebar_item_background))
+            .when(handle.is_open(), |element| {
+                element.bg(theme.sidebar_item_background)
+            })
+            .child(
+                div()
+                    .size(px(20.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon("icons/folder.svg", 16.0, theme.text_secondary)),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_size(px(13.0))
+                    .text_color(if scoped {
+                        theme.text
+                    } else {
+                        theme.text_secondary
+                    })
+                    .child(self.sidebar_project_filter_label()),
+            )
+            .child(icon("icons/chevron-down.svg", 11.0, theme.text_ghost));
+        let picker = dropdown_menu(
+            trigger,
+            "sidebar-project-filter-menu",
+            &handle,
+            MenuAlign::BelowLeft,
+            move |cx| {
+                let Some(entity) = weak.upgrade() else {
+                    return Vec::new();
+                };
+                let this = entity.read(cx);
+                let selected = this.resolved_sidebar_project_filter();
+                let project_options = this
+                    .state
+                    .projects
+                    .iter()
+                    .filter(|project| !project.is_projectless())
+                    .map(|project| (project.id, project.display_name()))
+                    .collect::<Vec<_>>();
+                let projectless = this.state.projects.iter().any(Project::is_projectless);
+                let mut items = vec![{
+                    let weak = weak.clone();
+                    MenuItem::new(tr!("sidebar.all_projects"), move |_, cx| {
+                        let _ = weak.update(cx, |this, cx| {
+                            this.set_sidebar_project_filter(None, cx);
+                        });
+                    })
+                    .icon("icons/list.svg")
+                    .selected(selected.is_none())
+                }];
+                if !project_options.is_empty() || projectless {
+                    items.push(MenuItem::Separator);
+                }
+                for (project_id, project_name) in project_options {
+                    let weak = weak.clone();
+                    items.push(
+                        MenuItem::new(project_name, move |_, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.set_sidebar_project_filter(
+                                    Some(SidebarProjectFilter::Project(project_id)),
+                                    cx,
+                                );
+                            });
+                        })
+                        .icon("icons/folder.svg")
+                        .selected(selected == Some(SidebarProjectFilter::Project(project_id))),
+                    );
+                }
+                if projectless {
+                    let weak = weak.clone();
+                    items.push(
+                        MenuItem::new(tr!("project.no_project_name"), move |_, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.set_sidebar_project_filter(
+                                    Some(SidebarProjectFilter::Projectless),
+                                    cx,
+                                );
+                            });
+                        })
+                        .icon("icons/x.svg")
+                        .selected(selected == Some(SidebarProjectFilter::Projectless)),
+                    );
+                }
+                items
+            },
+        );
+        div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .child(picker)
+            .child(self.render_sidebar_project_action(cx))
+    }
+
+    fn set_sidebar_project_filter(
+        &mut self,
+        project_filter: Option<SidebarProjectFilter>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sidebar_project_filter == project_filter {
+            return;
+        }
+        self.sidebar_project_filter = project_filter;
+        cx.notify();
+    }
+
     fn render_sidebar_new_session(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         self.render_sidebar_action_row(
             "sidebar-new-session",
@@ -470,28 +689,22 @@ impl Waku {
         }))
     }
 
-    fn render_sidebar_search(&self, cx: &mut Context<Self>) -> Div {
-        let search = self
-            .render_sidebar_action_row(
-                "sidebar-search",
-                "icons/search.svg",
-                tr!("sidebar.search"),
-                cx,
-            )
-            .on_click(cx.listener(|this, _, window, cx| {
+    fn render_sidebar_search(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        self.render_sidebar_action_row(
+            "sidebar-search",
+            "icons/search.svg",
+            tr!("sidebar.search"),
+            cx,
+        )
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.toggle_command_palette_action(&ToggleCommandPalette, window, cx);
+        }))
+        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                 this.toggle_command_palette_action(&ToggleCommandPalette, window, cx);
-            }))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    this.toggle_command_palette_action(&ToggleCommandPalette, window, cx);
-                    cx.stop_propagation();
-                }
-            }));
-        div()
-            .w_full()
-            .h(px(SIDEBAR_ACTION_ROW_HEIGHT + SIDEBAR_SEARCH_BOTTOM_GAP))
-            .flex_none()
-            .child(search)
+                cx.stop_propagation();
+            }
+        }))
     }
 
     fn start_available_update(&mut self, cx: &mut Context<Self>) {
@@ -694,12 +907,7 @@ impl Waku {
                 theme.sidebar
             })
             .child(self.render_sidebar_titlebar(cx))
-            .child(
-                div()
-                    .flex_none()
-                    .px(px(10.0))
-                    .child(self.render_sidebar_new_session(cx)),
-            )
+            .child(self.render_sidebar_chrome(cx))
             .child(
                 div()
                     .id("sidebar-scroll")
@@ -746,12 +954,16 @@ impl Waku {
     /// Snapshot the session history as a flat list of lightweight rows, newest
     /// first, grouped by calendar period like the previous eager render.
     fn sidebar_rows(&self, today: NaiveDate) -> Vec<SidebarRow> {
+        let project_filter = self.resolved_sidebar_project_filter();
+        let projectless_ids = collect_projectless_project_ids(&self.state.projects);
         let mut grouped_sessions: [Vec<Uuid>; 6] = std::array::from_fn(|_| Vec::new());
         let mut sorted_sessions = self
             .state
             .sessions
             .iter()
-            .filter(|session| session.has_started())
+            .filter(|session| {
+                sidebar_session_matches_project_filter(session, project_filter, &projectless_ids)
+            })
             .collect::<Vec<_>>();
         sorted_sessions
             .sort_by_key(|session| std::cmp::Reverse(sidebar_session_timestamp(session)));
@@ -760,7 +972,7 @@ impl Waku {
                 .push(session.id);
         }
 
-        let mut rows = vec![SidebarRow::Search];
+        let mut rows = Vec::new();
         for group in SessionDateGroup::ALL {
             let group_sessions = &grouped_sessions[group.index()];
             append_sidebar_group_rows(
@@ -770,11 +982,53 @@ impl Waku {
                 self.sidebar_collapsed_groups.contains(&group),
             );
         }
-        if rows.len() == 1 {
-            // Keep the project action visible while there is no history.
-            rows.push(SidebarRow::Header(SessionDateGroup::Today));
+        if rows.is_empty() && self.state.sessions.iter().any(AgentSession::has_started) {
+            rows.push(SidebarRow::EmptyFilter);
         }
         rows
+    }
+
+    fn render_sidebar_empty_filter(&self, cx: &mut Context<Self>) -> Div {
+        let theme = Theme::current(cx);
+        div()
+            .w_full()
+            .px(px(8.0))
+            .pt(px(10.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .text_color(theme.text_tertiary)
+                    .child(tr_cow!("sidebar.no_matching_tasks")),
+            )
+            .child(
+                div()
+                    .id("sidebar-show-all-projects")
+                    .tab_index(0)
+                    .w_full()
+                    .h(px(SIDEBAR_ACTION_ROW_HEIGHT))
+                    .px(px(4.0))
+                    .rounded(px(7.0))
+                    .flex()
+                    .items_center()
+                    .cursor_default()
+                    .text_size(px(13.0))
+                    .text_color(theme.text_secondary)
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .hover(|element| element.bg(theme.sidebar_item_background))
+                    .child(tr_cow!("sidebar.show_all_projects"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.set_sidebar_project_filter(None, cx);
+                    }))
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.set_sidebar_project_filter(None, cx);
+                            cx.stop_propagation();
+                        }
+                    })),
+            )
     }
 
     /// Keep the virtualized list in sync with the current row snapshot.
@@ -812,23 +1066,18 @@ impl Waku {
             return div().into_any_element();
         };
         match *row {
-            SidebarRow::Search => self.render_sidebar_search(cx).into_any_element(),
             SidebarRow::Header(group) => self
-                .render_sidebar_group_header(group, index == 1, cx)
+                .render_sidebar_group_header(group, cx)
                 .into_any_element(),
             SidebarRow::Session(session_id) => self
                 .render_sidebar_session_item(session_id, cx)
                 .into_any_element(),
             SidebarRow::GroupSpacer => div().w_full().h(px(10.0)).into_any_element(),
+            SidebarRow::EmptyFilter => self.render_sidebar_empty_filter(cx).into_any_element(),
         }
     }
 
-    fn render_sidebar_group_header(
-        &self,
-        group: SessionDateGroup,
-        first: bool,
-        cx: &mut Context<Self>,
-    ) -> Div {
+    fn render_sidebar_group_header(&self, group: SessionDateGroup, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let collapsed = self.sidebar_collapsed_groups.contains(&group);
         let group_name = SharedString::from(format!("sidebar-group-header-{}", group.index()));
@@ -879,11 +1128,6 @@ impl Waku {
                         }
                     })),
             )
-            .when(first, |element| {
-                element
-                    .justify_between()
-                    .child(self.render_sidebar_project_action(cx))
-            })
     }
 
     fn toggle_sidebar_group(&mut self, group: SessionDateGroup, cx: &mut Context<Self>) {
@@ -985,6 +1229,7 @@ impl Waku {
             session.status,
             SessionStatus::Connecting | SessionStatus::Working
         );
+        let show_project = self.resolved_sidebar_project_filter().is_none();
         let project_name = self
             .state
             .projects
@@ -992,6 +1237,12 @@ impl Waku {
             .find(|project| project.id == session.project_id)
             .map(Project::display_name)
             .unwrap_or_else(|| tr!("sidebar.unknown_project"));
+        let time_label = session_time_label(session, unix_time());
+        let time_color = if session.is_busy() {
+            theme.text_tertiary
+        } else {
+            theme.text_ghost
+        };
         let rename_input =
             (self.session_rename == Some(session_id)).then(|| self.session_rename_input.clone());
         let renaming = rename_input.is_some();
@@ -1091,40 +1342,46 @@ impl Waku {
                             12.0,
                             status_color(&theme, session.status),
                         ))
-                    }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .text_size(px(11.5))
-                    .line_height(px(15.0))
-                    .child(icon("icons/folder.svg", 11.0, theme.text_tertiary))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(theme.text_tertiary)
-                            .child(SharedString::from(project_name)),
-                    )
-                    .when_some(
-                        session_time_label(session, unix_time()),
-                        |element, label| {
+                    })
+                    .when(!show_project, |element| {
+                        element.when_some(time_label.clone(), |element, label| {
                             element.child(
                                 div()
                                     .flex_none()
-                                    .text_color(if session.is_busy() {
-                                        theme.text_tertiary
-                                    } else {
-                                        theme.text_ghost
-                                    })
+                                    .text_size(px(11.5))
+                                    .text_color(time_color)
                                     .child(SharedString::from(label)),
                             )
-                        },
-                    ),
+                        })
+                    }),
             )
+            .when(show_project, |element| {
+                element.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(5.0))
+                        .text_size(px(11.5))
+                        .line_height(px(15.0))
+                        .child(icon("icons/folder.svg", 11.0, theme.text_tertiary))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.text_tertiary)
+                                .child(SharedString::from(project_name)),
+                        )
+                        .when_some(time_label, |element, label| {
+                            element.child(
+                                div()
+                                    .flex_none()
+                                    .text_color(time_color)
+                                    .child(SharedString::from(label)),
+                            )
+                        }),
+                )
+            })
             .when(!renaming, |element| {
                 element
                     .track_focus(&row_focus)
@@ -1522,6 +1779,41 @@ mod tests {
     }
 
     #[test]
+    fn month_and_year_groups_respect_calendar_boundaries() {
+        let august_first = NaiveDate::from_ymd_opt(2026, 8, 1).unwrap();
+        assert_eq!(
+            session_date_group_for_dates(
+                NaiveDate::from_ymd_opt(2026, 7, 31).unwrap(),
+                august_first,
+            ),
+            SessionDateGroup::Yesterday
+        );
+        assert_ne!(
+            session_date_group_for_dates(
+                NaiveDate::from_ymd_opt(2026, 7, 31).unwrap(),
+                august_first,
+            ),
+            SessionDateGroup::ThisMonth
+        );
+
+        let january_first = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        assert_eq!(
+            session_date_group_for_dates(
+                NaiveDate::from_ymd_opt(2025, 12, 31).unwrap(),
+                january_first,
+            ),
+            SessionDateGroup::Yesterday
+        );
+        assert_ne!(
+            session_date_group_for_dates(
+                NaiveDate::from_ymd_opt(2025, 12, 31).unwrap(),
+                january_first,
+            ),
+            SessionDateGroup::ThisYear
+        );
+    }
+
+    #[test]
     fn future_sessions_stay_in_today() {
         let today = NaiveDate::from_ymd_opt(2026, 8, 12).unwrap();
         let tomorrow = NaiveDate::from_ymd_opt(2026, 8, 13).unwrap();
@@ -1576,5 +1868,85 @@ mod tests {
         let mut sessions = [&renamed_old_session, &newer_unanswered_session];
         sessions.sort_by_key(|session| std::cmp::Reverse(sidebar_session_timestamp(session)));
         assert_eq!(sessions[0].id, newer_unanswered_session.id);
+    }
+
+    #[test]
+    fn project_filter_keeps_matching_started_sessions() {
+        let project_a = Uuid::from_u128(1);
+        let project_b = Uuid::from_u128(2);
+        let mut session = AgentSession::new(project_a, ProviderKind::Codex);
+        session.messages.push(Message::new(MessageRole::User, "hi"));
+        assert!(sidebar_session_matches_project_filter(
+            &session,
+            None,
+            &HashSet::new()
+        ));
+        assert!(sidebar_session_matches_project_filter(
+            &session,
+            Some(SidebarProjectFilter::Project(project_a)),
+            &HashSet::new()
+        ));
+        assert!(!sidebar_session_matches_project_filter(
+            &session,
+            Some(SidebarProjectFilter::Project(project_b)),
+            &HashSet::new()
+        ));
+    }
+
+    #[test]
+    fn unstarted_sessions_stay_out_of_the_sidebar() {
+        let project_id = Uuid::from_u128(1);
+        let session = AgentSession::new(project_id, ProviderKind::Codex);
+        assert!(!sidebar_session_matches_project_filter(
+            &session,
+            None,
+            &HashSet::new()
+        ));
+        assert!(!sidebar_session_matches_project_filter(
+            &session,
+            Some(SidebarProjectFilter::Project(project_id)),
+            &HashSet::new()
+        ));
+    }
+
+    #[test]
+    fn projectless_filter_matches_all_projectless_projects() {
+        let projectless_a = Uuid::from_u128(1);
+        let projectless_b = Uuid::from_u128(2);
+        let ordinary = Uuid::from_u128(3);
+        let mut session_a = AgentSession::new(projectless_a, ProviderKind::Codex);
+        session_a
+            .messages
+            .push(Message::new(MessageRole::User, "a"));
+        let mut session_b = AgentSession::new(projectless_b, ProviderKind::Codex);
+        session_b
+            .messages
+            .push(Message::new(MessageRole::User, "b"));
+        let mut ordinary_session = AgentSession::new(ordinary, ProviderKind::Codex);
+        ordinary_session
+            .messages
+            .push(Message::new(MessageRole::User, "ordinary"));
+        let projects = vec![
+            Project::from_path(dirs::home_dir().unwrap().join(".waku/2026-08-12/a")),
+            Project::from_path(dirs::home_dir().unwrap().join(".waku/2026-08-12/b")),
+            Project::from_path(std::path::PathBuf::from("D:/project")),
+        ];
+        let projectless_ids = collect_projectless_project_ids(&projects);
+
+        assert!(sidebar_session_matches_project_filter(
+            &session_a,
+            Some(SidebarProjectFilter::Projectless),
+            &projectless_ids,
+        ));
+        assert!(sidebar_session_matches_project_filter(
+            &session_b,
+            Some(SidebarProjectFilter::Projectless),
+            &projectless_ids,
+        ));
+        assert!(!sidebar_session_matches_project_filter(
+            &ordinary_session,
+            Some(SidebarProjectFilter::Projectless),
+            &projectless_ids,
+        ));
     }
 }

@@ -18,13 +18,20 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
 pub fn find_executable(name: &str) -> Option<PathBuf> {
     let candidate = Path::new(name);
     if candidate.components().count() > 1 {
-        return executable_candidates(candidate)
-            .into_iter()
-            .find(|candidate| candidate.is_file());
+        return find_executable_at_path(candidate);
     }
     executable_search_paths()
         .into_iter()
         .flat_map(|directory| executable_candidates(&directory.join(name)))
+        .find(|candidate| candidate.is_file())
+}
+
+fn find_executable_at_path(path: &Path) -> Option<PathBuf> {
+    if path.is_file() {
+        return Some(path.to_path_buf());
+    }
+    executable_candidates(path)
+        .into_iter()
         .find(|candidate| candidate.is_file())
 }
 
@@ -44,7 +51,6 @@ fn executable_candidates(path: &Path) -> Vec<PathBuf> {
 
 #[cfg(windows)]
 fn executable_candidates_with_extensions(path: &Path, path_ext: &str) -> Vec<PathBuf> {
-    let candidates = vec![path.to_path_buf()];
     let extensions = path_ext
         .split(';')
         .filter(|extension| !extension.is_empty());
@@ -55,17 +61,18 @@ fn executable_candidates_with_extensions(path: &Path, path_ext: &str) -> Vec<Pat
                 .eq_ignore_ascii_case(&extension.to_string_lossy())
         })
     }) {
-        candidates
-    } else {
-        candidates
-            .into_iter()
-            .chain(extensions.map(|extension| {
-                let mut candidate = path.as_os_str().to_os_string();
-                candidate.push(extension);
-                PathBuf::from(candidate)
-            }))
-            .collect()
+        return vec![path.to_path_buf()];
     }
+
+    let mut candidates = extensions
+        .map(|extension| {
+            let mut candidate = path.as_os_str().to_os_string();
+            candidate.push(extension);
+            PathBuf::from(candidate)
+        })
+        .collect::<Vec<_>>();
+    candidates.push(path.to_path_buf());
+    candidates
 }
 
 /// Resolve a user-supplied binary override: `~` expands to the home
@@ -78,9 +85,7 @@ pub fn resolve_binary_override(spec: &str) -> Option<PathBuf> {
     }
     if let Some(rest) = spec.strip_prefix("~/") {
         let candidate = dirs::home_dir()?.join(rest);
-        return executable_candidates(&candidate)
-            .into_iter()
-            .find(|candidate| candidate.is_file());
+        return find_executable_at_path(&candidate);
     }
     find_executable(spec)
 }
@@ -158,12 +163,34 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn executable_candidates_follow_pathext() {
-        let candidates =
-            executable_candidates_with_extensions(Path::new("tool"), ".COM;.EXE;.BAT;.CMD");
-        assert!(candidates.contains(&PathBuf::from("tool.EXE")));
+        assert_eq!(
+            executable_candidates_with_extensions(Path::new("tool"), ".COM;.EXE;.BAT;.CMD"),
+            [
+                PathBuf::from("tool.COM"),
+                PathBuf::from("tool.EXE"),
+                PathBuf::from("tool.BAT"),
+                PathBuf::from("tool.CMD"),
+                PathBuf::from("tool"),
+            ]
+        );
         assert_eq!(
             executable_candidates_with_extensions(Path::new("tool.eXe"), ".COM;.EXE;.BAT;.CMD"),
             [PathBuf::from("tool.eXe")]
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn explicit_paths_keep_existing_custom_extensions() {
+        let root = std::env::temp_dir().join(format!("waku-command-env-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let original = root.join("agent.bin");
+        let sibling = root.join("agent.bin.exe");
+        std::fs::write(&original, b"custom launcher").unwrap();
+        std::fs::write(&sibling, b"native launcher").unwrap();
+
+        assert_eq!(find_executable_at_path(&original), Some(original.clone()));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

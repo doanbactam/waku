@@ -137,6 +137,9 @@ sidebar.minutes_ago: "%{count} 分钟前"
 sidebar.hours_ago: "%{count} 小时前"
 sidebar.days_ago: "%{count} 天前"
 sidebar.unknown_project: 未知项目
+sidebar.all_projects: 全部项目
+sidebar.no_matching_tasks: 该项目下没有任务
+sidebar.show_all_projects: 显示全部项目
 project.new_project: 新建项目…
 project.no_project: 不使用项目
 project.no_project_name: 无项目

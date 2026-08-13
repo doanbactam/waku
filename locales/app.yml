@@ -286,6 +286,12 @@ sidebar.days_ago:
   en: "%{count}d"
 sidebar.unknown_project:
   en: Unknown project
+sidebar.all_projects:
+  en: All projects
+sidebar.no_matching_tasks:
+  en: No tasks in this project
+sidebar.show_all_projects:
+  en: Show all projects
 
 project.new_project:
   en: New project…

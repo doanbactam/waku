@@ -149,6 +149,9 @@ sidebar.minutes_ago: "%{count} 分前"
 sidebar.hours_ago: "%{count} 時間前"
 sidebar.days_ago: "%{count} 日前"
 sidebar.unknown_project: 不明なプロジェクト
+sidebar.all_projects: すべてのプロジェクト
+sidebar.no_matching_tasks: このプロジェクトにタスクはありません
+sidebar.show_all_projects: すべてのプロジェクトを表示
 
 project.new_project: 新規プロジェクト…
 project.no_project: プロジェクトを使用しない
