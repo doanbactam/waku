@@ -901,6 +901,7 @@ impl Waku {
                     installed,
                     path,
                     models: crate::model_catalog::fallback_models(provider),
+                    agent_presets: crate::model_catalog::fallback_agent_presets(provider),
                 });
             }
             if installed {
@@ -1912,6 +1913,27 @@ impl Waku {
         }
     }
 
+    pub(super) fn agent_preset_for_session(&self, session: &AgentSession) -> Option<String> {
+        if session.provider != ProviderKind::DeepSeek {
+            return None;
+        }
+        session.agent_preset.clone().or_else(|| {
+            self.provider_probe(session.provider)
+                .and_then(ProviderProbe::preferred_agent_preset)
+                .map(|preset| preset.id.clone())
+        })
+    }
+
+    pub(super) fn agent_preset_label_for_session(&self, session: &AgentSession) -> Option<String> {
+        let id = self.agent_preset_for_session(session)?;
+        Some(
+            self.provider_probe(session.provider)
+                .and_then(|probe| probe.agent_presets.iter().find(|preset| preset.id == id))
+                .map(|preset| preset.display_name())
+                .unwrap_or(id),
+        )
+    }
+
     /// Releases provider processes for sessions nobody has touched in a while.
     ///
     /// Codex and Pi keep a process resident between turns, so an abandoned task
@@ -1987,6 +2009,7 @@ impl Waku {
                     provider = session.provider.display_name()
                 ))
             })?;
+        let agent_preset = self.agent_preset_for_session(session);
         let SessionOptions {
             mode,
             interaction_mode,
@@ -2004,6 +2027,7 @@ impl Waku {
                 model,
                 reasoning_effort,
                 service_tier,
+                agent_preset,
                 computer_use_enabled: self.state.computer_use_enabled,
                 provider_cursor: session.provider_cursor.clone(),
             },
@@ -2624,6 +2648,7 @@ impl Waku {
                 force_save |= matches!(
                     event,
                     DriverEvent::Connected { .. }
+                        | DriverEvent::AgentPresetSelected(_)
                         | DriverEvent::AutoTitleUpdated(_)
                         | DriverEvent::Permission { .. }
                         | DriverEvent::SteerAccepted { .. }
