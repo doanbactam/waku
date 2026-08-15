@@ -220,6 +220,12 @@ providers.checked_minutes_ago:
   en: Checked %{count}m ago
 providers.checked_hours_ago:
   en: Checked %{count}h ago
+providers.acp_ready:
+  en: ACP ready
+providers.acp_missing:
+  en: ACP adapter missing · install %{command}
+providers.acp_builtin:
+  en: ACP built in
 
 computer_use.allow_apps:
   en: Let Waku use apps

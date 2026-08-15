@@ -373,7 +373,6 @@ impl Waku {
         let start_width = match target {
             PanelResizeTarget::Sidebar => {
                 self.sidebar_width = sidebar_width;
-                crate::platform::set_sidebar_material_width(window, sidebar_width);
                 sidebar_width
             }
             PanelResizeTarget::RightPanel => {
@@ -418,7 +417,6 @@ impl Waku {
                     return;
                 }
                 self.sidebar_width = width;
-                crate::platform::set_sidebar_material_width(window, width);
             }
             PanelResizeTarget::RightPanel => {
                 let maximum = RIGHT_PANEL_MAX_WIDTH
@@ -642,20 +640,44 @@ impl Waku {
         model: String,
         cx: &mut Context<Self>,
     ) {
-        let Some((session_id, provider_changed)) = self
+        let Some(source) = self
             .selected_session()
             .filter(|session| {
-                session.can_choose_model(provider)
+                !session.status.is_busy()
                     && (session.provider != provider
                         || session.model.as_deref() != Some(model.as_str()))
             })
-            .map(|session| (session.id, session.provider != provider))
+            .cloned()
         else {
             return;
         };
 
         self.remember_selected_model_traits();
         let (reasoning_effort, service_tier) = self.state.model_traits_for(provider, &model);
+        let provider_changed = source.provider != provider;
+        if provider_changed && source.has_started() {
+            if self.session_has_live_background_work(source.id) {
+                return;
+            }
+            let title = format!("{} · {}", source.display_title(), provider.short_name());
+            let Some(mut branch) = source.branch_for_provider(provider, model.clone(), title)
+            else {
+                return;
+            };
+            branch.reasoning_effort = reasoning_effort.clone();
+            branch.service_tier = service_tier.clone();
+            let branch_id = branch.id;
+            self.state.push_session(branch);
+            self.state.last_provider = provider;
+            self.state.last_model = Some(model);
+            self.state.last_reasoning_effort = reasoning_effort;
+            self.state.last_service_tier = service_tier;
+            self.refresh_composer_sources(cx);
+            self.select_session(branch_id, cx);
+            return;
+        }
+
+        let session_id = source.id;
         if let Some(session) = self.selected_session_mut() {
             session.provider = provider;
             session.model = Some(model.clone());
@@ -669,15 +691,7 @@ impl Waku {
             self.state.last_reasoning_effort = reasoning_effort;
             self.state.last_service_tier = service_tier;
             self.model_picker_tab = ModelPickerTab::Provider(provider);
-            // A different provider is a different binary and protocol; only a
-            // model change within one provider can be applied in session.
-            if provider_changed {
-                self.reset_session_runtime(session_id);
-                // A different provider is also a different command registry.
-                self.refresh_composer_sources(cx);
-            } else {
-                self.apply_session_options(session_id);
-            }
+            self.apply_session_options(session_id);
             self.save();
             cx.notify();
         }

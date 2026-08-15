@@ -277,15 +277,7 @@ fn main() {
                 }
             });
 
-            window
-                .update(cx, |_, window, cx| {
-                    crate::platform::configure_sidebar_material(
-                        window,
-                        crate::theme::Theme::current(cx).is_dark,
-                    );
-                    cx.activate(true);
-                })
-                .ok();
+            window.update(cx, |_, _, cx| cx.activate(true)).ok();
 
             set_app_menus(cx, updater_available);
         });

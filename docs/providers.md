@@ -12,7 +12,7 @@ that spans the whole conversation**:
 | Transport | File | Providers |
 | --- | --- | --- |
 | Codex app-server (JSON-RPC over stdio) | [src/driver/codex.rs](../src/driver/codex.rs) | Codex CLI |
-| Agent Client Protocol (JSON-RPC over stdio) | [src/driver/acp.rs](../src/driver/acp.rs) | Cursor CLI, Grok Build |
+| Agent Client Protocol (JSON-RPC over stdio) | [src/driver/acp.rs](../src/driver/acp.rs) | Amp, Claude Code, Codex CLI, Cursor CLI, Grok Build, Pi, OpenCode |
 | OpenCode server (HTTP + server-sent events) | [src/driver/opencode.rs](../src/driver/opencode.rs) | OpenCode |
 | Pi RPC mode (NDJSON request/response over stdio) | [src/driver/pi.rs](../src/driver/pi.rs) | Pi |
 | Claude streaming-input session (NDJSON over stdio) | [src/driver/claude.rs](../src/driver/claude.rs) | Claude Code |
@@ -87,13 +87,18 @@ the transport absorbed the change or wants to be restarted:
 | --- | --- | --- | --- | --- | --- | --- |
 | Model, reasoning effort, service tier | in session — they ride on every `turn/start` | in session — `set_model`, `set_thinking_level` | in session — `session/set_model` | in session — the model rides on each prompt | in session — a `set_model` control request | restart — all three are launch arguments |
 | Access mode, interaction mode | restart | restart | restart | restart — the agent is chosen when the session opens | restart | restart |
-| Provider | restart | restart | restart | restart | restart | restart |
+| Provider | new branch | new branch | new branch | new branch | new branch | new branch |
 
 The permission policy is deliberately excluded even for Codex, which does carry
 `approvalPolicy` and `sandboxPolicy` on every `turn/start`: loosening or
 tightening what an already-running agent may touch deserves a fresh thread. T3
 Code draws the line in the same place — it restarts on `runtimeModeChanged` and
 keeps the session only for a model change the adapter declares it can switch.
+
+Waku keeps model changes in the current conversation when the provider can
+apply them between turns. Choosing a different provider while idle creates a
+new branch with copied visible history and a one-time context handoff; the new
+provider never receives the old provider's resume cursor.
 
 The idle sweep runs at most every 5 minutes off the existing frame tick and skips
 any session with an active turn, so a slow tool call or an unanswered approval is
@@ -502,7 +507,33 @@ received them.
 
 ## Agent Client Protocol
 
-**Launch** — `cursor-agent acp`, `grok agent stdio`
+**Launch** — Waku uses the following ACP agents when their adapter is installed,
+while retaining the native transport as a fallback:
+
+| Provider | ACP adapter | Install / launch | Native fallback |
+| --- | --- | --- | --- |
+| Amp | `amp-acp@0.9.0` | Download the platform binary from the ACP registry | `amp --execute --stream-json --stream-json-input` |
+| Claude Code | `claude-agent-acp@0.66.0` | `npm install -g @agentclientprotocol/claude-agent-acp@0.66.0` | `claude -p --input-format stream-json --output-format stream-json` |
+| Codex CLI | `codex-acp@1.2.0` | `npm install -g @agentclientprotocol/codex-acp@1.2.0` | `codex app-server --stdio` |
+| Pi | `pi-acp@0.0.33` | `npm install -g pi-acp@0.0.33` | `pi --mode rpc --approve` |
+| Cursor CLI | built-in CLI mode | `cursor-agent acp` | — |
+| Grok Build | built-in CLI mode | `grok agent stdio` | — |
+| OpenCode | built-in CLI mode | `opencode acp` | — |
+
+For the four external adapters Waku checks the configured provider binary
+first, then searches `PATH` for the adapter executable. If the adapter is not
+present, starting a session deliberately selects the existing native driver;
+installing an adapter therefore upgrades the provider to ACP without breaking
+existing installations. Each adapter remains a separate process and its
+underlying agent (`amp`, `claude`, `codex`, or `pi`) must be authenticated first.
+
+The ACP registry publishes `amp-acp`, `pi-acp`,
+`@agentclientprotocol/claude-agent-acp`, and
+`@agentclientprotocol/codex-acp`. Pin adapter versions in deployments instead
+of relying on an unversioned `npx` invocation because ACP schemas evolve
+independently of provider CLIs.
+
+**Built-in launch** — `cursor-agent acp`, `grok agent stdio`, `opencode acp`
 ([src/driver/acp.rs](../src/driver/acp.rs)).
 
 **Protocol** — newline-delimited JSON-RPC over stdio, bidirectional. One agent

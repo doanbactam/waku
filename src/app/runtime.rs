@@ -856,8 +856,11 @@ impl Waku {
                         Some(binary) => crate::command_env::resolve_binary_override(binary),
                         None => crate::command_env::find_executable(provider.command()),
                     };
+                    let acp_ready = path
+                        .as_deref()
+                        .is_some_and(|path| crate::driver::acp::supports_provider(provider, path));
                     if provider_detection_tx
-                        .send((provider, path.is_some(), path))
+                        .send((provider, path.is_some(), path, acp_ready))
                         .is_ok()
                     {
                         signal_event_pump(&event_wake);
@@ -880,7 +883,9 @@ impl Waku {
     pub(super) fn drain_provider_detection_events(&mut self) -> bool {
         let mut changed = false;
         let mut installed_providers = Vec::new();
-        while let Ok((provider, installed, path)) = self.provider_detection_events.try_recv() {
+        while let Ok((provider, installed, path, acp_ready)) =
+            self.provider_detection_events.try_recv()
+        {
             self.provider_detection_remaining = self.provider_detection_remaining.saturating_sub(1);
             if self.provider_detection_remaining == 0 {
                 self.provider_detection_checked_at = Some(Instant::now());
@@ -895,11 +900,13 @@ impl Waku {
             {
                 existing.installed = installed;
                 existing.path = path;
+                existing.acp_ready = acp_ready;
             } else {
                 self.probes.push(ProviderProbe {
                     provider,
                     installed,
                     path,
+                    acp_ready,
                     models: crate::model_catalog::fallback_models(provider),
                     agent_presets: crate::model_catalog::fallback_agent_presets(provider),
                 });
@@ -2498,6 +2505,16 @@ impl Waku {
         let driver_prompt =
             crate::composer_complete::expanded_submission(&prompt, &self.slash_command_index)
                 .unwrap_or(prompt);
+        let handoff = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .and_then(|session| session.provider_handoff.clone());
+        let driver_prompt = match handoff {
+            Some(context) => format!("{context}\n\n--- New user message ---\n{driver_prompt}"),
+            None => driver_prompt,
+        };
         let mut failed_to_start = false;
         match driver {
             Ok(driver) => driver.prompt(driver_prompt),

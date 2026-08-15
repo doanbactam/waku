@@ -5,7 +5,7 @@
 //! only adapts typed ACP messages to its provider-neutral [`DriverEvent`]s.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -57,25 +57,96 @@ pub struct AcpDriver {
 
 /// Per-provider launch details. Everything after process launch is ACP.
 struct AcpLaunch {
+    command: PathBuf,
     args: Vec<String>,
     env: Vec<(String, String)>,
 }
 
-fn launch_for(provider: ProviderKind) -> anyhow::Result<AcpLaunch> {
+const fn wrapper_name(provider: ProviderKind) -> Option<&'static str> {
+    match provider {
+        ProviderKind::Amp => Some("amp-acp"),
+        ProviderKind::Claude => Some("claude-agent-acp"),
+        ProviderKind::Codex => Some("codex-acp"),
+        ProviderKind::Pi => Some("pi-acp"),
+        ProviderKind::Cursor
+        | ProviderKind::DeepSeek
+        | ProviderKind::Grok
+        | ProviderKind::OpenCode => None,
+    }
+}
+
+pub(crate) fn supports_provider(provider: ProviderKind, binary: &Path) -> bool {
+    wrapper_name(provider).is_some_and(|wrapper| {
+        binary
+            .file_name()
+            .is_some_and(|name| name == std::ffi::OsStr::new(wrapper))
+            || crate::command_env::find_executable(wrapper).is_some()
+    }) || matches!(
+        provider,
+        ProviderKind::Cursor | ProviderKind::Grok | ProviderKind::OpenCode
+    )
+}
+
+fn launch_for(provider: ProviderKind, binary: &Path) -> anyhow::Result<AcpLaunch> {
     match provider {
         ProviderKind::Cursor => Ok(AcpLaunch {
+            command: binary.to_owned(),
             args: vec!["acp".into()],
             env: Vec::new(),
         }),
         ProviderKind::Grok => Ok(AcpLaunch {
+            command: binary.to_owned(),
             args: vec!["agent".into(), "stdio".into()],
             env: vec![("GROK_OAUTH2_REFERRER".into(), "waku".into())],
         }),
         ProviderKind::OpenCode => Ok(AcpLaunch {
+            command: binary.to_owned(),
             args: vec!["acp".into()],
             env: Vec::new(),
         }),
-        _ => Err(anyhow!(
+        provider @ (ProviderKind::Amp
+        | ProviderKind::Claude
+        | ProviderKind::Codex
+        | ProviderKind::Pi) => {
+            let wrapper = wrapper_name(provider)
+                .ok_or_else(|| anyhow!("{} has no ACP wrapper", provider.display_name()))?;
+            let command = if binary
+                .file_name()
+                .is_some_and(|name| name == std::ffi::OsStr::new(wrapper))
+            {
+                binary.to_owned()
+            } else {
+                crate::command_env::find_executable(wrapper).ok_or_else(|| {
+                    anyhow!(
+                        "{} ACP adapter is not installed; install `{wrapper}` or configure its binary path",
+                        provider.display_name()
+                    )
+                })?
+            };
+            let provider_binary = if command == binary {
+                crate::command_env::find_executable(provider.command())
+                    .unwrap_or_else(|| binary.to_owned())
+            } else {
+                binary.to_owned()
+            };
+            let provider_binary = provider_binary.to_string_lossy().into_owned();
+            let env = match provider {
+                ProviderKind::Amp => vec![("AMP_CLI_PATH".into(), provider_binary)],
+                ProviderKind::Claude => vec![("CLAUDE_CODE_EXECUTABLE".into(), provider_binary)],
+                ProviderKind::Codex => vec![("CODEX_PATH".into(), provider_binary)],
+                ProviderKind::Pi => Vec::new(),
+                ProviderKind::Cursor
+                | ProviderKind::DeepSeek
+                | ProviderKind::Grok
+                | ProviderKind::OpenCode => Vec::new(),
+            };
+            Ok(AcpLaunch {
+                command,
+                args: Vec::new(),
+                env,
+            })
+        }
+        ProviderKind::DeepSeek => Err(anyhow!(
             "{} does not speak the Agent Client Protocol",
             provider.display_name()
         )),
@@ -119,7 +190,7 @@ impl AcpDriver {
             None => None,
         };
 
-        let launch = launch_for(provider)?;
+        let launch = launch_for(provider, &binary)?;
         let computer_use = (provider == ProviderKind::Grok && computer_use_enabled)
             .then(|| super::support::HeadlessComputerUseRuntime::start(provider, events.clone()))
             .transpose()?;
@@ -129,7 +200,6 @@ impl AcpDriver {
             .map(ToOwned::to_owned);
         let stderr_lines = Arc::new(Mutex::new(Vec::<String>::new()));
         let agent = sdk_agent(
-            &binary,
             &cwd,
             launch,
             computer_use.as_ref().map(|runtime| &runtime.config),
@@ -183,19 +253,19 @@ impl AcpDriver {
 }
 
 fn sdk_agent(
-    binary: &Path,
     cwd: &Path,
     mut launch: AcpLaunch,
     computer_use: Option<&super::support::HeadlessComputerUseConfig>,
     stderr_lines: Arc<Mutex<Vec<String>>>,
 ) -> anyhow::Result<AcpAgent> {
     #[cfg(not(windows))]
-    let binary = binary
+    let binary = launch
+        .command
         .to_str()
         .ok_or_else(|| anyhow!("the ACP executable path is not valid UTF-8"))?
         .to_owned();
     #[cfg(windows)]
-    let binary = binary.to_owned();
+    let binary = launch.command.to_owned();
     let (computer_args, computer_env) =
         super::support::grok_computer_use_launch_configuration(computer_use);
     launch.args.extend(computer_args);
@@ -1270,9 +1340,9 @@ mod tests {
     #[test]
     fn sdk_agent_launches_the_binary_directly_on_windows() {
         let agent = sdk_agent(
-            Path::new("agent.exe"),
             Path::new("C:\\workspace"),
             AcpLaunch {
+                command: PathBuf::from("agent.exe"),
                 args: vec!["acp".into()],
                 env: Vec::new(),
             },
@@ -1289,9 +1359,9 @@ mod tests {
     #[test]
     fn sdk_agent_uses_env_to_set_the_unix_process_cwd() {
         let agent = sdk_agent(
-            Path::new("agent"),
             Path::new("/workspace"),
             AcpLaunch {
+                command: PathBuf::from("agent"),
                 args: vec!["acp".into()],
                 env: Vec::new(),
             },
@@ -1305,6 +1375,15 @@ mod tests {
             agent.config().arguments(),
             ["-C", "/workspace", "agent", "acp"]
         );
+    }
+
+    #[test]
+    fn acp_wrapper_names_route_the_four_external_adapters() {
+        assert_eq!(wrapper_name(ProviderKind::Amp), Some("amp-acp"));
+        assert_eq!(wrapper_name(ProviderKind::Claude), Some("claude-agent-acp"));
+        assert_eq!(wrapper_name(ProviderKind::Codex), Some("codex-acp"));
+        assert_eq!(wrapper_name(ProviderKind::Pi), Some("pi-acp"));
+        assert_eq!(wrapper_name(ProviderKind::Grok), None);
     }
 
     /// Drives a real agent through the SDK-backed driver. Ignored by default:

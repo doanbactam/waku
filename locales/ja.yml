@@ -114,6 +114,9 @@ providers.binary_path_description: Waku が %{provider} の起動に使用する
 providers.checked_just_now: たった今確認済み
 providers.checked_minutes_ago: "%{count} 分前に確認済み"
 providers.checked_hours_ago: "%{count} 時間前に確認済み"
+providers.acp_ready: ACP 準備完了
+providers.acp_missing: ACP アダプターがありません · %{command} をインストール
+providers.acp_builtin: ACP 内蔵
 
 computer_use.allow_apps: Waku にアプリの操作を許可
 computer_use.availability: コンピュータ操作は Codex、OpenCode、Grok、Pi で利用できます

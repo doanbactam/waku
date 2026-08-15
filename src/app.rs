@@ -840,8 +840,8 @@ pub struct Waku {
     provider_version_probes_pending: HashSet<ProviderKind>,
     /// PATH re-detection results from the Providers page's refresh, merged
     /// into `probes` without touching their model catalogs.
-    provider_detection_tx: Sender<(ProviderKind, bool, Option<PathBuf>)>,
-    provider_detection_events: Receiver<(ProviderKind, bool, Option<PathBuf>)>,
+    provider_detection_tx: Sender<(ProviderKind, bool, Option<PathBuf>, bool)>,
+    provider_detection_events: Receiver<(ProviderKind, bool, Option<PathBuf>, bool)>,
     /// Providers the running re-detection has not answered for yet; empty
     /// means no re-detection is in flight.
     provider_detection_remaining: usize,
@@ -1624,7 +1624,6 @@ impl Waku {
         state.sidebar_width = sidebar_width;
         state.right_panel_width = right_panel_width;
         crate::theme::apply_theme_preference(state.theme, window, cx);
-        crate::platform::set_sidebar_material_width(window, sidebar_width);
         let project_paths = state
             .projects
             .iter()

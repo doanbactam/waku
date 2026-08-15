@@ -267,6 +267,10 @@ impl Waku {
                 if let Some(session) = self.state.session_mut(session_id)
                     && session.active_turn_id().is_some()
                 {
+                    // The provider has accepted the first handoff prompt.
+                    // Keep it persisted until this point so a startup or
+                    // transport failure can retry with the original context.
+                    session.provider_handoff = None;
                     session.mark_active_turn_provider_started();
                     session.status = SessionStatus::Working;
                 }

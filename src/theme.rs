@@ -1,4 +1,4 @@
-use gpui::{App, Global, Hsla, Window, WindowAppearance, hsla, rgb, transparent_black};
+use gpui::{App, Global, Hsla, Window, WindowAppearance, hsla, rgb};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -42,10 +42,9 @@ impl ThemePreference {
 }
 
 /// Waku's visual language, take two: neutral graphite surfaces in the spirit
-/// of Cursor — color is reserved for meaning. On macOS the sidebar's semantic
-/// tint is installed as a native layer above Sidebar vibrancy; keeping this
-/// GPUI surface clear avoids incorrectly accumulating the alpha of nested Metal
-/// backgrounds. Selected, hovered, and pressed rows remain a 6% neutral layer.
+/// of Cursor — color is reserved for meaning. Every platform paints the same
+/// opaque GPUI surfaces. Selected, hovered, and pressed rows remain a 6%
+/// neutral layer.
 #[derive(Clone, Copy)]
 pub struct Theme {
     pub is_dark: bool,
@@ -110,7 +109,7 @@ impl Theme {
         Self {
             is_dark: true,
             canvas: rgb(0x1A1A1A).into(),
-            sidebar: transparent_black(),
+            sidebar: rgb(0x181818).into(),
             sidebar_drag_background: rgb(0x181818).into(),
             sidebar_item_background: hsla(0.0, 0.0, 0.941, 0.06),
             surface: rgb(0x1A1A1A).into(),
@@ -153,7 +152,7 @@ impl Theme {
         Self {
             is_dark: false,
             canvas: rgb(0xF6F5F6).into(),
-            sidebar: transparent_black(),
+            sidebar: rgb(0xF0F0F0).into(),
             sidebar_drag_background: rgb(0xF3F3F3).into(),
             sidebar_item_background: hsla(0.0, 0.0, 0.078, 0.06),
             surface: rgb(0xF6F5F6).into(),
@@ -226,6 +225,5 @@ pub fn apply_theme_preference(preference: ThemePreference, window: &mut Window, 
         },
         cx,
     );
-    crate::platform::configure_sidebar_material(window, is_dark);
     window.refresh();
 }

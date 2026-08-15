@@ -1198,6 +1198,7 @@ impl StateStore {
         session.reasoning_effort = stored.reasoning_effort;
         session.service_tier = stored.service_tier;
         session.context_usage = stored.context_usage;
+        session.provider_handoff = stored.provider_handoff;
 
         let mut statement = connection
             .prepare(
@@ -1471,6 +1472,7 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
         transcript_blocks: Vec::new(),
         turns: Vec::new(),
         queued_messages: Vec::new(),
+        provider_handoff: None,
         detail_loaded: false,
     })
 }

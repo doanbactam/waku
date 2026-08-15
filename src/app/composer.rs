@@ -505,7 +505,9 @@ impl Waku {
         let selected_model = session.and_then(|session| self.model_for_session(session));
         let selected_model_name = self.model_display_name(provider, selected_model);
         let locked_provider = session
-            .filter(|session| !session.messages.is_empty())
+            .filter(|session| {
+                session.status.is_busy() || self.session_has_live_background_work(session.id)
+            })
             .map(|session| session.provider);
         let picker_enabled = session.is_some_and(|session| session.can_choose_model(provider));
 
@@ -560,7 +562,10 @@ impl Waku {
                         // tab whose rows the filter would leave empty.
                         let locked = this
                             .selected_session()
-                            .is_some_and(|session| !session.messages.is_empty());
+                            .is_some_and(|session| {
+                                session.status.is_busy()
+                                    || this.session_has_live_background_work(session.id)
+                            });
                         let provider =
                             if !locked && this.state.disabled_providers.contains(&provider) {
                                 ProviderKind::ALL
@@ -1013,7 +1018,9 @@ impl Waku {
         }
         let locked_provider = self
             .selected_session()
-            .filter(|session| !session.messages.is_empty())
+            .filter(|session| {
+                session.status.is_busy() || self.session_has_live_background_work(session.id)
+            })
             .map(|session| session.provider);
         let tabs = visible_picker_tabs(
             &self.probes,
@@ -1040,7 +1047,9 @@ impl Waku {
         let provider = session.map(|session| session.provider).unwrap_or_default();
         let selected_model = session.and_then(|session| self.model_for_session(session));
         let locked_provider = session
-            .filter(|session| !session.messages.is_empty())
+            .filter(|session| {
+                session.status.is_busy() || self.session_has_live_background_work(session.id)
+            })
             .map(|session| session.provider);
         let index = visible_picker_models(
             &self.probes,
@@ -2863,12 +2872,13 @@ pub(super) fn next_picker_highlight(
 }
 
 /// The sidebar tabs the picker can land on, in rail order: favorites first,
-/// then every installed provider a new session may use.
+/// then every installed provider available to this session or its new branch.
 ///
 /// Shared by the rail's click gating and by `tab`'s cycle handler so the two
-/// agree on which tabs are usable. A locked session keeps its own provider
-/// usable even if it was switched off afterwards — disabling is for new work —
-/// while every other provider drops out for the lock's duration.
+/// agree on which tabs are usable. While a turn is running, a locked session
+/// keeps its own provider usable even if it was switched off afterwards —
+/// disabling is for new work — while every other provider drops out until the
+/// turn settles.
 pub(super) fn visible_picker_tabs(
     probes: &[ProviderProbe],
     disabled_providers: &[ProviderKind],

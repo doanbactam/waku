@@ -84,6 +84,16 @@ impl ProviderKind {
         }
     }
 
+    pub fn acp_adapter_command(self) -> Option<&'static str> {
+        match self {
+            Self::Amp => Some("amp-acp"),
+            Self::Claude => Some("claude-agent-acp"),
+            Self::Codex => Some("codex-acp"),
+            Self::Pi => Some("pi-acp"),
+            Self::Cursor | Self::DeepSeek | Self::OpenCode | Self::Grok => None,
+        }
+    }
+
     pub fn supports_conversation_rollback(self) -> bool {
         matches!(
             self,
@@ -453,6 +463,8 @@ pub struct ProviderProbe {
     pub installed: bool,
     pub path: Option<PathBuf>,
     #[serde(default)]
+    pub acp_ready: bool,
+    #[serde(default)]
     pub models: Vec<ProviderModel>,
     #[serde(default)]
     pub agent_presets: Vec<ProviderAgentPreset>,
@@ -464,6 +476,9 @@ impl ProviderProbe {
         Self {
             provider,
             installed: path.is_some(),
+            acp_ready: path
+                .as_deref()
+                .is_some_and(|path| crate::driver::acp::supports_provider(provider, path)),
             path,
             models: crate::model_catalog::fallback_models(provider),
             agent_presets: crate::model_catalog::fallback_agent_presets(provider),
@@ -478,6 +493,9 @@ impl ProviderProbe {
         Self {
             provider,
             installed: path.is_some(),
+            acp_ready: path
+                .as_deref()
+                .is_some_and(|path| crate::driver::acp::supports_provider(provider, path)),
             path,
             models: crate::model_catalog::fallback_models(provider),
             agent_presets: crate::model_catalog::fallback_agent_presets(provider),
@@ -801,6 +819,11 @@ pub struct AgentSession {
     pub turns: Vec<AgentTurn>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queued_messages: Vec<QueuedMessage>,
+    /// Context copied from the previous provider when a conversation is
+    /// branched to a different provider. It is consumed by the first prompt
+    /// on the new provider and then cleared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_handoff: Option<String>,
     /// Whether the transcript has been read from the database.
     ///
     /// Startup loads only the columns the session list needs, so a session
@@ -819,6 +842,12 @@ fn detail_loaded_default() -> bool {
 
 impl AgentSession {
     pub const DEFAULT_TITLE: &'static str = "New task";
+    const MAX_PROVIDER_HANDOFF_CHARS: usize = 32_000;
+    const PROVIDER_HANDOFF_HEADER: &'static str =
+        "The following is conversation context from another provider.\n\
+Use it as background context; do not claim you produced the earlier messages.\n\n";
+    const PROVIDER_HANDOFF_OMISSION: &'static str =
+        "[Earlier context omitted to stay within the handoff budget.]\n";
 
     pub fn new(project_id: Uuid, provider: ProviderKind) -> Self {
         let now = unix_time();
@@ -848,6 +877,7 @@ impl AgentSession {
             transcript_blocks: Vec::new(),
             turns: Vec::new(),
             queued_messages: Vec::new(),
+            provider_handoff: None,
         }
     }
 
@@ -935,8 +965,8 @@ impl AgentSession {
         true
     }
 
-    pub fn can_choose_model(&self, provider: ProviderKind) -> bool {
-        !self.status.is_busy() && (self.messages.is_empty() || self.provider == provider)
+    pub fn can_choose_model(&self, _provider: ProviderKind) -> bool {
+        !self.status.is_busy()
     }
 
     pub fn migrate_legacy_state(&mut self) {
@@ -1256,6 +1286,92 @@ impl AgentSession {
         // source session is still holding for the live agent.
         fork.queued_messages.clear();
         Some(fork)
+    }
+
+    pub fn branch_for_provider(
+        &self,
+        provider: ProviderKind,
+        model: String,
+        title: String,
+    ) -> Option<Self> {
+        if self.messages.is_empty() {
+            return None;
+        }
+
+        let mut branch = self.clone();
+        let branch_id = Uuid::new_v4();
+        let turn_ids = branch
+            .turns
+            .iter()
+            .map(|turn| (turn.id, Uuid::new_v4()))
+            .collect::<std::collections::HashMap<_, _>>();
+        for turn in &mut branch.turns {
+            turn.id = turn_ids[&turn.id];
+        }
+        for message in &mut branch.messages {
+            message.id = Uuid::new_v4();
+            if let Some(turn_id) = message.turn_id {
+                message.turn_id = turn_ids.get(&turn_id).copied();
+            }
+            message.streaming = false;
+        }
+        for block in &mut branch.transcript_blocks {
+            if let Some(turn_id) = block.turn_id {
+                block.turn_id = turn_ids.get(&turn_id).copied();
+            }
+        }
+
+        let entries = branch
+            .messages
+            .iter()
+            .map(|message| {
+                let role = match message.role {
+                    MessageRole::User => "user",
+                    MessageRole::Assistant => "assistant",
+                    MessageRole::System => "system",
+                };
+                format!("[{role}]\n{}", message.visible_content())
+            })
+            .collect::<Vec<_>>();
+        let all_handoff = entries.join("\n\n");
+        let content_budget = Self::MAX_PROVIDER_HANDOFF_CHARS
+            .saturating_sub(Self::PROVIDER_HANDOFF_HEADER.chars().count());
+        let handoff = if all_handoff.chars().count() <= content_budget {
+            all_handoff
+        } else {
+            let tail_budget = content_budget
+                .saturating_sub(Self::PROVIDER_HANDOFF_OMISSION.chars().count());
+            let tail = all_handoff
+                .chars()
+                .rev()
+                .take(tail_budget)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>();
+            format!("{}{tail}", Self::PROVIDER_HANDOFF_OMISSION)
+        };
+        let now = unix_time();
+        branch.id = branch_id;
+        branch.title = Self::DEFAULT_TITLE.to_owned();
+        branch.auto_title = Some(title);
+        branch.provider = provider;
+        branch.model = Some(model);
+        branch.provider_cursor = None;
+        branch.provider_session_id = None;
+        branch.available_commands.clear();
+        branch.context_usage = None;
+        branch.agent_preset = None;
+        branch.status = SessionStatus::Idle;
+        branch.created_at = now;
+        branch.updated_at = now;
+        branch.last_reply_at = None;
+        branch.queued_messages.clear();
+        branch.provider_handoff = Some(format!(
+            "{}{handoff}",
+            Self::PROVIDER_HANDOFF_HEADER
+        ));
+        Some(branch)
     }
 }
 
@@ -2776,7 +2892,7 @@ mod tests {
     }
 
     #[test]
-    fn model_selection_keeps_started_sessions_on_their_provider() {
+    fn model_selection_allows_idle_started_sessions_to_change_provider() {
         let project = Project::from_path(PathBuf::from("/tmp/waku"));
         let mut session = AgentSession::new(project.id, ProviderKind::Codex);
 
@@ -2784,7 +2900,7 @@ mod tests {
 
         session.push_message(MessageRole::User, "first turn");
         assert!(session.can_choose_model(ProviderKind::Codex));
-        assert!(!session.can_choose_model(ProviderKind::Claude));
+        assert!(session.can_choose_model(ProviderKind::Claude));
     }
 
     #[test]
@@ -2804,6 +2920,55 @@ mod tests {
 
         session.status = SessionStatus::Idle;
         assert!(session.can_choose_model(ProviderKind::Codex));
+    }
+
+    #[test]
+    fn provider_branch_copies_history_without_reusing_provider_cursor() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
+        session.provider_cursor = Some(ProviderResumeCursor::Codex {
+            thread_id: "codex-thread".into(),
+        });
+        session.push_message(MessageRole::User, "inspect the repository");
+        session.push_message(MessageRole::Assistant, "I will inspect it.");
+
+        let branch = session
+            .branch_for_provider(
+                ProviderKind::Claude,
+                "claude-sonnet".into(),
+                "Repository · Claude".into(),
+            )
+            .expect("started sessions can branch to another provider");
+
+        assert_ne!(branch.id, session.id);
+        assert_eq!(branch.provider, ProviderKind::Claude);
+        assert_eq!(branch.model.as_deref(), Some("claude-sonnet"));
+        assert!(branch.provider_cursor.is_none());
+        assert_eq!(branch.messages.len(), session.messages.len());
+        assert_ne!(branch.messages[0].id, session.messages[0].id);
+        assert!(branch
+            .provider_handoff
+            .as_deref()
+            .is_some_and(|handoff| handoff.contains("inspect the repository")));
+    }
+
+    #[test]
+    fn provider_branch_bounds_large_handoff_context() {
+        let project = Project::from_path(PathBuf::from("/tmp/waku"));
+        let mut session = AgentSession::new(project.id, ProviderKind::Codex);
+        session.push_message(MessageRole::User, "x".repeat(40_000));
+
+        let branch = session
+            .branch_for_provider(
+                ProviderKind::Claude,
+                "claude-sonnet".into(),
+                "Repository · Claude".into(),
+            )
+            .expect("history can be handed off");
+        let handoff = branch.provider_handoff.expect("handoff exists");
+
+        assert!(handoff.contains("Earlier context omitted"));
+        assert!(handoff.chars().count() <= AgentSession::MAX_PROVIDER_HANDOFF_CHARS + 200);
     }
 
     #[test]

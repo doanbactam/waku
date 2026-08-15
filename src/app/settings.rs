@@ -760,6 +760,7 @@ impl Waku {
         for (index, kind) in ProviderKind::ALL.into_iter().enumerate() {
             let probe = self.provider_probe(kind);
             let installed = probe.is_some_and(|probe| probe.installed);
+            let acp_ready = probe.is_some_and(|probe| probe.acp_ready);
             let compacted_path = probe
                 .filter(|probe| probe.installed)
                 .and_then(|probe| probe.path.as_deref())
@@ -806,6 +807,19 @@ impl Waku {
                         command = kind.command()
                     )))
                     .into_any_element()
+            };
+
+            let acp_status = if !installed {
+                None
+            } else if acp_ready {
+                Some((tr!("providers.acp_ready"), theme.success))
+            } else if let Some(command) = kind.acp_adapter_command() {
+                Some((
+                    tr!("providers.acp_missing", command = command),
+                    theme.warning,
+                ))
+            } else {
+                Some((tr!("providers.acp_builtin"), theme.success))
             };
 
             let toggle_on = !disabled;
@@ -927,6 +941,18 @@ impl Waku {
                                             .text_size(px(10.0))
                                             .text_color(theme.text_tertiary)
                                             .child(SharedString::from(format!("v{version}"))),
+                                    )
+                                })
+                                .when_some(acp_status, |element, (label, color)| {
+                                    element.child(
+                                        div()
+                                            .px(px(5.0))
+                                            .py(px(1.0))
+                                            .rounded(px(4.0))
+                                            .bg(color.opacity(0.12))
+                                            .text_size(px(9.5))
+                                            .text_color(color)
+                                            .child(label),
                                     )
                                 }),
                         )

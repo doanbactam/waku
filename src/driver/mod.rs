@@ -1,4 +1,4 @@
-mod acp;
+pub(crate) mod acp;
 mod activity;
 mod amp;
 mod claude;
@@ -189,7 +189,13 @@ pub fn start(
     events: DriverEventSender,
 ) -> anyhow::Result<DriverHandle> {
     let inner: Arc<dyn DriverControl> = match provider {
+        ProviderKind::Codex if acp::supports_provider(provider, &options.binary) => {
+            Arc::new(acp::AcpDriver::start(provider, options, events)?)
+        }
         ProviderKind::Codex => Arc::new(codex::CodexDriver::start(options, events)?),
+        ProviderKind::Pi if acp::supports_provider(provider, &options.binary) => {
+            Arc::new(acp::AcpDriver::start(provider, options, events)?)
+        }
         ProviderKind::Pi => Arc::new(pi::PiDriver::start(options, events)?),
         // Cursor and Grok both serve a long-lived ACP session, which is the only
         // way their Supervised mode can actually ask the user rather than
@@ -204,9 +210,15 @@ pub fn start(
         // Claude serves a realtime stream of user messages on stdin — the same
         // transport the Agent SDK drives — which is what lets its Supervised
         // mode ask rather than decide alone.
+        ProviderKind::Claude if acp::supports_provider(provider, &options.binary) => {
+            Arc::new(acp::AcpDriver::start(provider, options, events)?)
+        }
         ProviderKind::Claude => Arc::new(claude::ClaudeDriver::start(options, events)?),
         // Amp reads newline-delimited user messages on stdin and stays alive
         // until stdin closes, so it too serves the whole conversation.
+        ProviderKind::Amp if acp::supports_provider(provider, &options.binary) => {
+            Arc::new(acp::AcpDriver::start(provider, options, events)?)
+        }
         ProviderKind::Amp => Arc::new(amp::AmpDriver::start(options, events)?),
     };
     Ok(DriverHandle { inner })
