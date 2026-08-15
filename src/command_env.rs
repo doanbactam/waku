@@ -576,7 +576,7 @@ mod tests {
     #[test]
     fn launch_services_path_is_extended_for_script_based_clis() {
         let home = Path::new("/Users/example");
-        let paths = search_paths_from(Some(OsStr::new("/usr/bin:/bin")), Some(home));
+        let paths = search_paths_from(Some(OsStr::new("/usr/bin:/bin")), None, Some(home));
 
         assert_eq!(paths[0], PathBuf::from("/usr/bin"));
         assert_eq!(paths[1], PathBuf::from("/bin"));
