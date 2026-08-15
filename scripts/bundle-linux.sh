@@ -25,12 +25,13 @@ case "$profile" in
 esac
 
 binary="$cargo_target_dir/$cargo_profile/waku"
-if [ ! -x "$binary" ]; then
+computer_use_binary="$cargo_target_dir/$cargo_profile/waku_computer_use_linux"
+if [ ! -x "$binary" ] || [ ! -x "$computer_use_binary" ]; then
   echo "[bundle-linux] building $cargo_profile binary..."
   if [ "$profile" = "release" ]; then
-    cargo build --release --bin waku --bin waku_js_repl
+    cargo build --release --bin waku --bin waku_js_repl --bin waku_computer_use_linux
   else
-    cargo build --bin waku --bin waku_js_repl
+    cargo build --bin waku --bin waku_js_repl --bin waku_computer_use_linux
   fi
 fi
 
@@ -61,10 +62,10 @@ case "$action" in
     out="$cargo_target_dir/$cargo_profile/linux-dist"
     mkdir -p "$out/bin"
     cp "$binary" "$out/bin/waku"
+    cp "$computer_use_binary" "$out/bin/waku_computer_use_linux"
     [ -x "$repl_binary" ] && cp "$repl_binary" "$out/bin/waku_js_repl" || true
-    # Computer Use portable resources (the native accessibility backend is
-    # macOS-only, but the REPL, Pi extension, and skill are portable and
-    # resolved relative to the executable — see src/computer_use.rs).
+    # Computer Use resources are resolved relative to the executable — see
+    # src/computer_use.rs.
     mkdir -p "$out/bin/resources/computer-use" "$out/bin/resources/skills/waku-computer-use"
     cp resources/computer-use/pi-extension.ts "$out/bin/resources/computer-use/pi-extension.ts"
     cp resources/computer-use/SKILL.md "$out/bin/resources/skills/waku-computer-use/SKILL.md"
@@ -78,6 +79,7 @@ case "$action" in
     appsdir="$prefix/share/applications"
     mkdir -p "$bindir" "$appsdir"
     cp "$binary" "$bindir/waku"
+    cp "$computer_use_binary" "$bindir/waku_computer_use_linux"
     chmod 755 "$bindir/waku"
     [ -x "$repl_binary" ] && cp "$repl_binary" "$bindir/waku_js_repl" && chmod 755 "$bindir/waku_js_repl" || true
     mkdir -p "$bindir/resources/computer-use" "$bindir/resources/skills/waku-computer-use"

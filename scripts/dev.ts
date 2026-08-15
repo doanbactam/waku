@@ -41,7 +41,7 @@ async function build(): Promise<boolean> {
         stdout: "inherit",
         stderr: "inherit",
       })
-    : Bun.spawn(["cargo", "build", "--bin", "waku", "--jobs", "2"], {
+    : Bun.spawn(["cargo", "build", "--bin", "waku", "--bin", "waku_js_repl", "--bin", isWindows ? "waku_computer_use_windows" : "waku_computer_use_linux", "--jobs", "2"], {
         cwd: root,
         stdout: "inherit",
         stderr: "inherit",

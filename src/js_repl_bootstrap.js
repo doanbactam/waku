@@ -364,7 +364,7 @@
     let sky = globalThis[computerUseRuntimeKey];
     if (!sky) {
       sky = Object.freeze({
-        target: "mac",
+        target: "__WAKU_TARGET__",
         list_apps: async () => nativeCall("list_apps"),
         get_app_state: async (arguments_ = {}) => nativeCall("get_app_state", arguments_),
         click: async (arguments_) => { nativeCall("click", arguments_); },

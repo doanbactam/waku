@@ -609,7 +609,9 @@ fn create_kernel(
             globals.set("__wakuCwd", cwd.display().to_string())?;
             globals.set("__wakuHomeDir", home.display().to_string())?;
             globals.set("__wakuTmpDir", temp.display().to_string())?;
-            ctx.eval::<(), _>(KERNEL_BOOTSTRAP)?;
+            let sky_target = if cfg!(target_os = "macos") { "mac" } else if cfg!(target_os = "linux") { "linux" } else { "windows" };
+            let bootstrap = KERNEL_BOOTSTRAP.replace("__WAKU_TARGET__", sky_target);
+            ctx.eval::<(), _>(bootstrap.as_str())?;
             let timer_dispatch = globals.get::<_, Function<'_>>("__wakuRunTimer")?;
             let request_meta_setter = globals.get::<_, Function<'_>>("__wakuSetRequestMeta")?;
             globals.remove("__wakuRunTimer")?;

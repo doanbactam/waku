@@ -79,19 +79,22 @@ cross-platform by `js_repl_server_path`, `pi_extension_path`, and
 directory next to the executable (the bundle scripts copy them there).
 
 **Native accessibility backend** — `probe_permissions` and
-`mcp_server_command` — is macOS-only today. `@oai/sky` itself ships
+`mcp_server_command` — use the platform backend. `@oai/sky` itself ships
 separate backends per OS:
 
-- **Linux**: AT-SPI / AT-SPI2, plus a screen-capture backend (PipeWire or
-  X11). The `bin/linux/` helpers in `@oai/sky` are the reference.
-- **Windows**: UIAutomation, plus GDI/DXGI screen capture. The
-  `bin/windows/` helpers in `@oai/sky` are the reference.
+- **Linux**: Waku uses AT-SPI / AT-SPI2 for the accessibility tree and the
+  XDG Screenshot/RemoteDesktop portals for Wayland-safe capture and input. The
+  backend is shipped as the Rust `waku_computer_use_linux` helper; it never
+  shells out to external scripting or `xdotool`.
+- **Windows**: UI Automation, GDI desktop capture, and `SendInput`, shipped
+  by the Rust `waku_computer_use_windows` helper. The helper is the Windows
+  equivalent of the macOS Swift and Linux portal backends.
 
 These are entirely different native APIs, not a port of the Swift helper.
-A Linux or Windows Computer Use backend is a standalone project; until it
-ships, `probe_permissions` and `mcp_server_command` return clear errors on
-non-macOS and the provider drivers that require Computer Use (Codex, Pi,
-OpenCode, Grok) start without it.
+The MCP/`sky` contract is shared, while target resolution, capture, input,
+permissions, and stale-element validation stay native to each OS. A Windows
+build is only advertised as Computer Use-capable when the native sibling
+helper is present; it never silently falls back to another platform.
 
 ### Updater (`src/updater.rs`)
 

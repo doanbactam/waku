@@ -27,30 +27,30 @@ esac
 # *.exe from a plain `cargo build`.
 windows_target="${WIN_CARGO_TARGET:-}"
 if [ -n "$windows_target" ]; then
-  cargo build --release --bin waku --bin waku_js_repl --target "$windows_target" 2>/dev/null || \
-    cargo build --bin waku --bin waku_js_repl --target "$windows_target"
+  cargo build --release --bin waku --bin waku_js_repl --bin waku_computer_use_windows --target "$windows_target" 2>/dev/null || \
+    cargo build --bin waku --bin waku_js_repl --bin waku_computer_use_windows --target "$windows_target"
   bin_dir="$cargo_target_dir/$windows_target/$cargo_profile"
 else
   if [ "$profile" = "release" ]; then
-    cargo build --release --bin waku --bin waku_js_repl 2>/dev/null || true
+    cargo build --release --bin waku --bin waku_js_repl --bin waku_computer_use_windows
   else
-    cargo build --bin waku --bin waku_js_repl 2>/dev/null || true
+    cargo build --bin waku --bin waku_js_repl --bin waku_computer_use_windows
   fi
   bin_dir="$cargo_target_dir/$cargo_profile"
 fi
 
 out="$cargo_target_dir/$cargo_profile/windows-dist"
 mkdir -p "$out"
-for name in waku waku_js_repl; do
+for name in waku waku_js_repl waku_computer_use_windows; do
   for ext in exe ""; do
     src="$bin_dir/$name.$ext"
     [ -f "$src" ] && cp "$src" "$out/" && break
   done
 done
 
-# Computer Use portable resources (the native accessibility backend is
-# macOS-only, but the REPL, Pi extension, and skill are portable and
-# resolved relative to the executable — see src/computer_use.rs).
+# Computer Use portable resources are resolved relative to the executable —
+# see src/computer_use.rs. The Windows native helper is copied when the
+# platform build supplies it; this script does not invent a fallback backend.
 mkdir -p "$out/resources/computer-use" "$out/resources/skills/waku-computer-use"
 cp resources/computer-use/pi-extension.ts "$out/resources/computer-use/pi-extension.ts"
 cp resources/computer-use/SKILL.md "$out/resources/skills/waku-computer-use/SKILL.md"

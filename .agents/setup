@@ -40,6 +40,7 @@ packages=(
   musl-tools
   pipewire
   pkg-config
+  at-spi2-core
   xdg-desktop-portal
 )
 missing_packages=()

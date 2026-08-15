@@ -209,13 +209,37 @@ pub fn probe_permissions(prompt: bool) -> anyhow::Result<ComputerPermissions> {
     Ok(response.permissions.unwrap_or_default())
 }
 
-/// Computer Use's native accessibility/capture backend is macOS-only today.
-/// Windows needs a UI Automation + Win32 input/capture backend, and Linux
-/// needs AT-SPI + desktop capture (Wayland portals complicate this). See
-/// docs/cross-platform.md for the implementation seams.
 #[cfg(not(target_os = "macos"))]
+fn probe_native_permissions(backend_name: &str) -> anyhow::Result<ComputerPermissions> {
+    let helper = mcp_server_command()?;
+    let status = std::process::Command::new(helper)
+        .arg("status")
+        .output()
+        .with_context(|| format!("failed to probe the {backend_name} backend"))?;
+    if !status.status.success() {
+        bail!("{backend_name} backend is unavailable: {}", String::from_utf8_lossy(&status.stderr).trim());
+    }
+    let response: Value = serde_json::from_slice(&status.stdout)
+        .with_context(|| format!("{backend_name} backend returned invalid JSON"))?;
+    Ok(ComputerPermissions {
+        accessibility: response.pointer("/permissions/accessibility").and_then(Value::as_bool).unwrap_or(false),
+        screen_recording: response.pointer("/permissions/screenRecording").and_then(Value::as_bool).unwrap_or(false),
+    })
+}
+
+#[cfg(target_os = "linux")]
 pub fn probe_permissions(_prompt: bool) -> anyhow::Result<ComputerPermissions> {
-    bail!("Computer Use's native accessibility backend is not yet supported on this platform")
+    probe_native_permissions("Linux AT-SPI")
+}
+
+#[cfg(target_os = "windows")]
+pub fn probe_permissions(_prompt: bool) -> anyhow::Result<ComputerPermissions> {
+    probe_native_permissions("Windows UI Automation")
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "linux"), not(target_os = "windows")))]
+pub fn probe_permissions(_prompt: bool) -> anyhow::Result<ComputerPermissions> {
+    bail!("Computer Use's native accessibility backend is not supported on this platform")
 }
 
 #[cfg(target_os = "macos")]
@@ -301,13 +325,35 @@ pub fn mcp_server_command() -> anyhow::Result<PathBuf> {
     Ok(helper.join("Contents").join("MacOS").join(executable))
 }
 
-/// The MCP server is the native accessibility/capture helper, which is
-/// macOS-only today. A Windows (UI Automation) or Linux (AT-SPI) backend
-/// would replace this; the portable resources (REPL, Pi extension, skills)
-/// are resolved separately and do not require this function.
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 pub fn mcp_server_command() -> anyhow::Result<PathBuf> {
-    bail!("Computer Use's native accessibility backend is not yet supported on this platform")
+    let executable = std::env::current_exe().context("Waku executable path is unavailable")?;
+    let path = executable.parent().ok_or_else(|| anyhow!("Waku executable has no parent directory"))?
+        .join("waku_computer_use_linux");
+    let path = if path.is_file() {
+        path
+    } else {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/debug/waku_computer_use_linux")
+    };
+    if !path.is_file() { bail!("Native Linux Computer Use helper is missing from this Waku build") }
+    Ok(path)
+}
+
+#[cfg(target_os = "windows")]
+pub fn mcp_server_command() -> anyhow::Result<PathBuf> {
+    let executable = std::env::current_exe().context("Waku executable path is unavailable")?;
+    let dir = executable.parent().ok_or_else(|| anyhow!("Waku executable has no parent directory"))?;
+    let path = dir.join("waku_computer_use_windows.exe");
+    if !path.is_file() {
+        bail!("Native Windows UI Automation/Graphics Capture helper is missing from this Waku build")
+    }
+    Ok(path)
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "linux"), not(target_os = "windows")))]
+pub fn mcp_server_command() -> anyhow::Result<PathBuf> {
+    bail!("Computer Use's native accessibility backend is not supported on this platform")
 }
 
 #[cfg(target_os = "macos")]

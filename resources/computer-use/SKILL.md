@@ -1,12 +1,12 @@
 ---
 name: waku-computer-use
-description: Control local Mac apps through Waku Computer Use for tasks that require reading or operating app UI. Prefer purpose-built connectors, APIs, or CLIs when available.
+description: Control local desktop apps through Waku Computer Use for tasks that require reading or operating app UI. Prefer purpose-built connectors, APIs, or CLIs when available.
 ---
 
 ## waku_js_repl + Waku Computer Use
 
 * Use the `js` tool from `waku_js_repl` for all Computer Use actions.
-* Do not use other technologies besides `waku_js_repl` for computer interactions, unless specifically requested by the user (e.g. AppleScript, `osascript`, JXA, System Events, CGEvent synthesis).
+* Do not use other technologies besides `waku_js_repl` for computer interactions, unless specifically requested by the user. The native backend selects macOS Accessibility, Linux AT-SPI/XDG portals, or Windows UI Automation automatically.
 * Prefer a dedicated plugin or skill when it can complete the task; use Computer Use for app interactions that are not exposed through a more specific interface.
 * The QuickJS state is persistent across `js` calls.
 * For text output, use `nodeRepl.write(...)`. `nodeRepl.write(...)` takes a string. If you would like to read a whole object, wrap it with `JSON.stringify(...)`.
@@ -29,7 +29,7 @@ After `js_reset`, run the bootstrap again before using `sky`.
 
 ```ts
 type Sky = {
-  target: "mac";
+  target: "mac" | "linux" | "windows";
   click: (args: { app: string, element_index?: number, x?: number, y?: number, mouse_button?: MouseButton, click_count?: number }) => Promise<void>;
   drag: (args: { app: string, from_x: number, from_y: number, to_x: number, to_y: number }) => Promise<void>;
   get_app_state: (args: { app: string, disableDiff?: boolean }) => Promise<AppState>;
@@ -109,7 +109,7 @@ Notes:
 * Prefer using accessibility text over screenshots for efficiency, but if the interface is not fully working or not providing enough context, fetch a screenshot. The accessibility interface may be incomplete in some applications, so a screenshot helps fully understand what is going on.
 * `perform_secondary_action` is for invoking an accessibility action that an element exposes besides a normal click, such as expanding a disclosure row, showing a menu, incrementing a control, or cancelling something. It requires an action actually exposed for that element in the accessibility text. Do not guess action names.
 * `select_text` selects matching text in an editable element. Use `prefix` and `suffix` to disambiguate repeated matches, and `selection_type` to choose whether to select the text itself or place the cursor before or after it.
-* `press_key` presses a key or key combination, including modifier and navigation keys. `press_key.key` supports xdotool-style key syntax. Examples: `"a"`, `"Return"`, `"Tab"`, `"super+c"`, `"Up"`, and `"KP_0"` for numpad `0`.
+* `press_key` presses a key or key combination, including modifier and navigation keys. Key names follow the platform-native helper contract. On Linux, coordinate input uses the XDG RemoteDesktop portal and requires the user to approve the portal session.
 * `press_key` and `type_text` target the specified app, so they cannot invoke global shortcuts.
 * Take care when passing strings containing `\n` or `\r` to `type_text`, as it simulates pressing the Return key. Many apps with message composers or forms will respond by sending the message or submitting the form rather than inserting a newline.
 * No need to open or launch apps; `get_app_state` transparently launches an installed app in the background if it is not already running.
