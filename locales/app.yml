@@ -270,6 +270,20 @@ sidebar.today:
   en: Today
 sidebar.search:
   en: Search
+sidebar.filters:
+  en: Filters
+sidebar.provider:
+  en: Provider
+sidebar.status:
+  en: Status
+sidebar.active:
+  en: Active
+sidebar.needs_you:
+  en: Needs you
+sidebar.done:
+  en: Done
+sidebar.failed:
+  en: Failed
 sidebar.yesterday:
   en: Yesterday
 sidebar.this_week:
@@ -294,10 +308,14 @@ sidebar.unknown_project:
   en: Unknown project
 sidebar.all_projects:
   en: All projects
+sidebar.all_providers:
+  en: All providers
+sidebar.projects:
+  en: Projects
 sidebar.no_matching_tasks:
   en: No tasks in this project
-sidebar.show_all_projects:
-  en: Show all projects
+sidebar.clear_filters:
+  en: Clear filters
 
 project.new_project:
   en: New project…

@@ -1,4 +1,3 @@
-use chrono::{DateTime, Datelike, Days, Local, NaiveDate, Utc};
 use gpui::{KeyBinding, actions};
 use std::collections::HashSet;
 
@@ -19,94 +18,41 @@ pub fn init(cx: &mut App) {
     )]);
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(super) enum SessionDateGroup {
-    Today,
-    Yesterday,
-    ThisWeek,
-    ThisMonth,
-    ThisYear,
-    More,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SidebarProjectFilter {
     Project(Uuid),
     Projectless,
 }
 
-impl SessionDateGroup {
-    const ALL: [Self; 6] = [
-        Self::Today,
-        Self::Yesterday,
-        Self::ThisWeek,
-        Self::ThisMonth,
-        Self::ThisYear,
-        Self::More,
-    ];
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SidebarStatusFilter {
+    All,
+    Active,
+    NeedsYou,
+    Done,
+    Failed,
+}
 
-    fn index(self) -> usize {
-        match self {
-            Self::Today => 0,
-            Self::Yesterday => 1,
-            Self::ThisWeek => 2,
-            Self::ThisMonth => 3,
-            Self::ThisYear => 4,
-            Self::More => 5,
-        }
-    }
-
+impl SidebarStatusFilter {
     fn label(self) -> String {
         match self {
-            Self::Today => tr!("sidebar.today"),
-            Self::Yesterday => tr!("sidebar.yesterday"),
-            Self::ThisWeek => tr!("sidebar.this_week"),
-            Self::ThisMonth => tr!("sidebar.this_month"),
-            Self::ThisYear => tr!("sidebar.this_year"),
-            Self::More => tr!("sidebar.more"),
+            Self::All => tr!("sidebar.all_statuses"),
+            Self::Active => tr!("sidebar.active"),
+            Self::NeedsYou => tr!("sidebar.needs_you"),
+            Self::Done => tr!("sidebar.done"),
+            Self::Failed => tr!("sidebar.failed"),
         }
     }
-}
 
-fn session_date_group(timestamp: u64, today: NaiveDate) -> SessionDateGroup {
-    let session_date = i64::try_from(timestamp)
-        .ok()
-        .and_then(|timestamp| DateTime::<Utc>::from_timestamp(timestamp, 0))
-        .map(|timestamp| timestamp.with_timezone(&Local).date_naive())
-        .unwrap_or(today);
-    session_date_group_for_dates(session_date, today)
-}
-
-fn session_date_group_for_dates(session_date: NaiveDate, today: NaiveDate) -> SessionDateGroup {
-    if session_date >= today {
-        return SessionDateGroup::Today;
+    fn matches(self, status: SessionStatus) -> bool {
+        match self {
+            Self::All => true,
+            Self::Active => matches!(status, SessionStatus::Connecting | SessionStatus::Working),
+            Self::NeedsYou => status == SessionStatus::Waiting,
+            Self::Done => status == SessionStatus::Idle,
+            Self::Failed => status == SessionStatus::Failed,
+        }
     }
-
-    if today.pred_opt() == Some(session_date) {
-        return SessionDateGroup::Yesterday;
-    }
-
-    let week_start = today
-        .checked_sub_days(Days::new(today.weekday().num_days_from_monday().into()))
-        .unwrap_or(today);
-    if session_date >= week_start {
-        return SessionDateGroup::ThisWeek;
-    }
-
-    let month_start = today.with_day(1).unwrap_or(today);
-    if session_date >= month_start {
-        return SessionDateGroup::ThisMonth;
-    }
-
-    let year_start = today
-        .with_month(1)
-        .and_then(|date| date.with_day(1))
-        .unwrap_or(today);
-    if session_date >= year_start {
-        return SessionDateGroup::ThisYear;
-    }
-
-    SessionDateGroup::More
 }
 
 fn session_group_header(theme: &Theme) -> Div {
@@ -118,23 +64,6 @@ fn session_group_header(theme: &Theme) -> Div {
         .text_size(px(12.5))
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme.text_tertiary)
-}
-
-fn append_sidebar_group_rows(
-    rows: &mut Vec<SidebarRow>,
-    group: SessionDateGroup,
-    sessions: &[Uuid],
-    collapsed: bool,
-) {
-    if sessions.is_empty() {
-        return;
-    }
-
-    rows.push(SidebarRow::Header(group));
-    if !collapsed {
-        rows.extend(sessions.iter().copied().map(SidebarRow::Session));
-    }
-    rows.push(SidebarRow::GroupSpacer);
 }
 
 fn updater_button_available_content(
@@ -196,7 +125,7 @@ pub(super) fn session_time_label(session: &AgentSession, now: u64) -> Option<Str
         .map(|last_reply_at| format_time_ago(now.saturating_sub(last_reply_at)))
 }
 
-/// Recency for sidebar ordering and date groups. A submitted turn promotes the
+/// Recency for sidebar ordering. A submitted turn promotes the
 /// task immediately, while metadata edits such as a rename do not; a task with
 /// no turns stays anchored to when it was created.
 fn sidebar_session_timestamp(session: &AgentSession) -> u64 {
@@ -206,9 +135,12 @@ fn sidebar_session_timestamp(session: &AgentSession) -> u64 {
 fn sidebar_session_matches_project_filter(
     session: &AgentSession,
     project_filter: Option<SidebarProjectFilter>,
+    provider_filter: Option<ProviderKind>,
     projectless_project_ids: &HashSet<Uuid>,
 ) -> bool {
-    if !session.has_started() {
+    if !session.has_started()
+        || provider_filter.is_some_and(|provider| session.provider != provider)
+    {
         return false;
     }
     match project_filter {
@@ -243,11 +175,11 @@ pub(super) fn format_time_ago(seconds: u64) -> String {
 /// One row of the virtualized sidebar session history.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SidebarRow {
-    /// Date-group header. Groups sort history; they never filter it.
-    Header(SessionDateGroup),
+    /// Project header for the project-first task list.
+    ProjectHeader(Uuid),
     /// A started session.
     Session(Uuid),
-    /// Spacing between date groups.
+    /// Spacing between project groups.
     GroupSpacer,
     /// History exists, but the project scope hides every task.
     EmptyFilter,
@@ -503,9 +435,19 @@ impl Waku {
             .flex()
             .flex_col()
             .gap(px(2.0))
-            .child(self.render_sidebar_project_filter(cx))
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .child(self.render_sidebar_project_selector(cx))
+                    .child(self.render_sidebar_project_action(cx)),
+            )
+            .child(self.render_sidebar_history_header(cx))
             .child(self.render_sidebar_new_session(cx))
             .child(self.render_sidebar_search(cx))
+            .child(self.render_sidebar_filters(cx))
             .pb(px(8.0))
     }
 
@@ -521,6 +463,22 @@ impl Waku {
                 .unwrap_or_else(|| tr!("sidebar.all_projects")),
             Some(SidebarProjectFilter::Projectless) => tr!("project.no_project_name"),
         }
+    }
+
+    fn sidebar_active_filter_count(&self) -> usize {
+        usize::from(self.sidebar_provider_filter.is_some())
+            + usize::from(self.sidebar_status_filter != SidebarStatusFilter::All)
+    }
+
+    fn sidebar_filter_summary(&self) -> Option<String> {
+        let mut summary = Vec::new();
+        if let Some(provider) = self.sidebar_provider_filter {
+            summary.push(provider.short_name().to_owned());
+        }
+        if self.sidebar_status_filter != SidebarStatusFilter::All {
+            summary.push(self.sidebar_status_filter.label());
+        }
+        (!summary.is_empty()).then(|| summary.join(" · "))
     }
 
     fn resolved_sidebar_project_filter(&self) -> Option<SidebarProjectFilter> {
@@ -541,7 +499,7 @@ impl Waku {
         }
     }
 
-    fn render_sidebar_project_filter(&self, cx: &mut Context<Self>) -> Div {
+    fn render_sidebar_project_selector(&self, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let scoped = self.resolved_sidebar_project_filter().is_some();
         let handle = self.menu_handle("sidebar-project-filter", cx);
@@ -569,7 +527,7 @@ impl Waku {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(icon("icons/folder.svg", 16.0, theme.text_secondary)),
+                    .child(div().size(px(20.0))),
             )
             .child(
                 div()
@@ -604,14 +562,14 @@ impl Waku {
                     .map(|project| (project.id, project.display_name()))
                     .collect::<Vec<_>>();
                 let projectless = this.state.projects.iter().any(Project::is_projectless);
-                let mut items = vec![{
+                let mut items = vec![MenuItem::Header(tr!("sidebar.projects").into()), {
                     let weak = weak.clone();
                     MenuItem::new(tr!("sidebar.all_projects"), move |_, cx| {
                         let _ = weak.update(cx, |this, cx| {
                             this.set_sidebar_project_filter(None, cx);
                         });
                     })
-                    .icon("icons/list.svg")
+                    .icon("icons/folder.svg")
                     .selected(selected.is_none())
                 }];
                 if !project_options.is_empty() || projectless {
@@ -652,11 +610,193 @@ impl Waku {
         );
         div()
             .w_full()
+            .min_w_0()
             .flex()
             .items_center()
             .gap(px(2.0))
             .child(picker)
-            .child(self.render_sidebar_project_action(cx))
+    }
+
+    fn render_sidebar_filters(&self, cx: &mut Context<Self>) -> Div {
+        let theme = Theme::current(cx);
+        let handle = self.menu_handle("sidebar-filters", cx);
+        let weak = cx.entity().downgrade();
+        let active_count = self.sidebar_active_filter_count();
+        let trigger = div()
+            .id("sidebar-filters")
+            .w_full()
+            .h(px(SIDEBAR_ACTION_ROW_HEIGHT))
+            .px(px(4.0))
+            .rounded(px(7.0))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .cursor_default()
+            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .hover(|element| element.bg(theme.sidebar_item_background))
+            .when(handle.is_open(), |element| {
+                element.bg(theme.sidebar_item_background)
+            })
+            .tooltip(Tooltip::text(tr_cow!("sidebar.filters")))
+            .child(icon(
+                "icons/sliders.svg",
+                15.0,
+                if active_count > 0 {
+                    theme.accent
+                } else {
+                    theme.text_secondary
+                },
+            ))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_size(px(13.0))
+                    .text_color(theme.text_secondary)
+                    .child(tr!("sidebar.filters")),
+            )
+            .when_some(self.sidebar_filter_summary(), |element, summary| {
+                element.child(
+                    div()
+                        .max_w(px(150.0))
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(11.5))
+                        .text_color(theme.accent)
+                        .child(SharedString::from(summary)),
+                )
+            })
+            .child(icon("icons/chevron-down.svg", 11.0, theme.text_ghost));
+        let picker = dropdown_menu(
+            trigger,
+            "sidebar-filters-menu",
+            &handle,
+            MenuAlign::BelowRight,
+            move |cx| {
+                let Some(entity) = weak.upgrade() else {
+                    return Vec::new();
+                };
+                let this = entity.read(cx);
+                let selected_provider = this.sidebar_provider_filter;
+                let selected_status = this.sidebar_status_filter;
+                let mut items = Vec::new();
+                if active_count > 0 {
+                    let weak = weak.clone();
+                    items.push(
+                        MenuItem::new(tr!("sidebar.clear_filters"), move |_, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.clear_sidebar_filters(cx);
+                            });
+                        })
+                        .icon("icons/x.svg"),
+                    );
+                    items.push(MenuItem::Separator);
+                }
+                items.push(MenuItem::Header(tr!("sidebar.provider").into()));
+                {
+                    let weak = weak.clone();
+                    items.push(
+                        MenuItem::new(tr!("sidebar.all_providers"), move |_, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.set_sidebar_provider_filter(None, cx);
+                            });
+                        })
+                        .icon("icons/bot.svg")
+                        .selected(selected_provider.is_none()),
+                    );
+                }
+                for provider in ProviderKind::ALL {
+                    if !this
+                        .state
+                        .sessions
+                        .iter()
+                        .any(|session| session.has_started() && session.provider == provider)
+                    {
+                        continue;
+                    }
+                    let weak = weak.clone();
+                    items.push(
+                        MenuItem::new(provider.display_name(), move |_, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.set_sidebar_provider_filter(Some(provider), cx);
+                            });
+                        })
+                        .icon(provider_icon(provider))
+                        .selected(selected_provider == Some(provider)),
+                    );
+                }
+                items.push(MenuItem::Separator);
+                items.push(MenuItem::Header(tr!("sidebar.status").into()));
+                for status in [
+                    SidebarStatusFilter::All,
+                    SidebarStatusFilter::Active,
+                    SidebarStatusFilter::NeedsYou,
+                    SidebarStatusFilter::Done,
+                    SidebarStatusFilter::Failed,
+                ] {
+                    let weak = weak.clone();
+                    items.push(
+                        MenuItem::new(status.label(), move |_, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.sidebar_status_filter = status;
+                                cx.notify();
+                            });
+                        })
+                        .icon(match status {
+                            SidebarStatusFilter::All => "icons/gauge.svg",
+                            SidebarStatusFilter::Active => "icons/loader-circle.svg",
+                            SidebarStatusFilter::NeedsYou => "icons/alert.svg",
+                            SidebarStatusFilter::Done => "icons/check.svg",
+                            SidebarStatusFilter::Failed => "icons/x.svg",
+                        })
+                        .selected(selected_status == status),
+                    );
+                }
+                items
+            },
+        );
+        div().w_full().child(picker)
+    }
+
+    fn render_sidebar_history_header(&self, cx: &mut Context<Self>) -> Div {
+        let theme = Theme::current(cx);
+        div()
+            .h(px(SIDEBAR_ACTION_ROW_HEIGHT))
+            .w_full()
+            .px(px(8.0))
+            .rounded(px(7.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(icon("icons/folder.svg", 16.0, theme.text_tertiary))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_size(px(13.5))
+                    .text_color(theme.text_tertiary)
+                    .child(tr!("sidebar.projects")),
+            )
+    }
+
+    fn set_sidebar_provider_filter(
+        &mut self,
+        provider_filter: Option<ProviderKind>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sidebar_provider_filter == provider_filter {
+            return;
+        }
+        self.sidebar_provider_filter = provider_filter;
+        cx.notify();
+    }
+
+    fn clear_sidebar_filters(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_provider_filter = None;
+        self.sidebar_status_filter = SidebarStatusFilter::All;
+        cx.notify();
     }
 
     fn set_sidebar_project_filter(
@@ -889,7 +1029,7 @@ impl Waku {
 
         // Building the row snapshot is cheap (a few bytes per session); the
         // heavy element construction happens only for rows the list can see.
-        let rows = Rc::new(self.sidebar_rows(Local::now().date_naive()));
+        let rows = Rc::new(self.sidebar_rows());
         self.sync_sidebar_rows(&rows);
         let history_scrolled =
             self.sidebar_list_state.scroll_px_offset_for_scrollbar().y < px(-0.5);
@@ -953,34 +1093,43 @@ impl Waku {
 
     /// Snapshot the session history as a flat list of lightweight rows, newest
     /// first, grouped by calendar period like the previous eager render.
-    fn sidebar_rows(&self, today: NaiveDate) -> Vec<SidebarRow> {
+    fn sidebar_rows(&self) -> Vec<SidebarRow> {
         let project_filter = self.resolved_sidebar_project_filter();
+        let provider_filter = self.sidebar_provider_filter;
+        let status_filter = self.sidebar_status_filter;
         let projectless_ids = collect_projectless_project_ids(&self.state.projects);
-        let mut grouped_sessions: [Vec<Uuid>; 6] = std::array::from_fn(|_| Vec::new());
         let mut sorted_sessions = self
             .state
             .sessions
             .iter()
             .filter(|session| {
-                sidebar_session_matches_project_filter(session, project_filter, &projectless_ids)
+                sidebar_session_matches_project_filter(
+                    session,
+                    project_filter,
+                    provider_filter,
+                    &projectless_ids,
+                ) && status_filter.matches(session.status)
             })
             .collect::<Vec<_>>();
         sorted_sessions
             .sort_by_key(|session| std::cmp::Reverse(sidebar_session_timestamp(session)));
-        for session in sorted_sessions {
-            grouped_sessions[session_date_group(sidebar_session_timestamp(session), today).index()]
-                .push(session.id);
-        }
 
+        let mut groups: Vec<(Uuid, Vec<Uuid>)> = Vec::new();
+        for session in sorted_sessions {
+            if let Some((_, sessions)) = groups
+                .iter_mut()
+                .find(|(project_id, _)| *project_id == session.project_id)
+            {
+                sessions.push(session.id);
+            } else {
+                groups.push((session.project_id, vec![session.id]));
+            }
+        }
         let mut rows = Vec::new();
-        for group in SessionDateGroup::ALL {
-            let group_sessions = &grouped_sessions[group.index()];
-            append_sidebar_group_rows(
-                &mut rows,
-                group,
-                group_sessions,
-                self.sidebar_collapsed_groups.contains(&group),
-            );
+        for (project_id, sessions) in groups {
+            rows.push(SidebarRow::ProjectHeader(project_id));
+            rows.extend(sessions.into_iter().map(SidebarRow::Session));
+            rows.push(SidebarRow::GroupSpacer);
         }
         if rows.is_empty() && self.state.sessions.iter().any(AgentSession::has_started) {
             rows.push(SidebarRow::EmptyFilter);
@@ -1018,13 +1167,19 @@ impl Waku {
                     .text_color(theme.text_secondary)
                     .focus_visible(|style| style.border_1().border_color(theme.accent))
                     .hover(|element| element.bg(theme.sidebar_item_background))
-                    .child(tr_cow!("sidebar.show_all_projects"))
+                    .child(tr_cow!("sidebar.clear_filters"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.set_sidebar_project_filter(None, cx);
+                        this.set_sidebar_provider_filter(None, cx);
+                        this.sidebar_status_filter = SidebarStatusFilter::All;
+                        cx.notify();
                     }))
                     .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                         if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                             this.set_sidebar_project_filter(None, cx);
+                            this.set_sidebar_provider_filter(None, cx);
+                            this.sidebar_status_filter = SidebarStatusFilter::All;
+                            cx.notify();
                             cx.stop_propagation();
                         }
                     })),
@@ -1066,8 +1221,8 @@ impl Waku {
             return div().into_any_element();
         };
         match *row {
-            SidebarRow::Header(group) => self
-                .render_sidebar_group_header(group, cx)
+            SidebarRow::ProjectHeader(project_id) => self
+                .render_sidebar_project_header(project_id, cx)
                 .into_any_element(),
             SidebarRow::Session(session_id) => self
                 .render_sidebar_session_item(session_id, cx)
@@ -1077,78 +1232,30 @@ impl Waku {
         }
     }
 
-    fn render_sidebar_group_header(&self, group: SessionDateGroup, cx: &mut Context<Self>) -> Div {
+    fn render_sidebar_project_header(&self, project_id: Uuid, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
-        let collapsed = self.sidebar_collapsed_groups.contains(&group);
-        let group_name = SharedString::from(format!("sidebar-group-header-{}", group.index()));
-        let chevron = icon("icons/chevron-down.svg", 11.0, theme.text_ghost)
-            .when(collapsed, |icon| {
-                icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.75)))
-            })
-            .invisible()
-            .group_hover(group_name.clone(), |icon| icon.visible());
-
-        session_group_header(&theme)
-            .group(group_name)
-            .w_full()
-            .child(
-                div()
-                    .id(SharedString::from(format!(
-                        "sidebar-group-toggle-{}",
-                        group.index()
-                    )))
-                    .tab_index(0)
-                    .h(px(22.0))
-                    .rounded(px(4.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .cursor_default()
-                    .focus_visible(|style| style.border_1().border_color(theme.accent))
-                    .child(group.label())
-                    .child(chevron)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_sidebar_group(group, cx);
-                    }))
-                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                        match event.keystroke.key.as_str() {
-                            "enter" | "space" => {
-                                this.toggle_sidebar_group(group, cx);
-                                cx.stop_propagation();
-                            }
-                            "left" if !collapsed => {
-                                this.set_sidebar_group_collapsed(group, true, cx);
-                                cx.stop_propagation();
-                            }
-                            "right" if collapsed => {
-                                this.set_sidebar_group_collapsed(group, false, cx);
-                                cx.stop_propagation();
-                            }
-                            _ => {}
-                        }
-                    })),
-            )
-    }
-
-    fn toggle_sidebar_group(&mut self, group: SessionDateGroup, cx: &mut Context<Self>) {
-        let collapsed = !self.sidebar_collapsed_groups.contains(&group);
-        self.set_sidebar_group_collapsed(group, collapsed, cx);
-    }
-
-    fn set_sidebar_group_collapsed(
-        &mut self,
-        group: SessionDateGroup,
-        collapsed: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let changed = if collapsed {
-            self.sidebar_collapsed_groups.insert(group)
-        } else {
-            self.sidebar_collapsed_groups.remove(&group)
-        };
-        if changed {
-            cx.notify();
-        }
+        let project_name = self
+            .state
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .map(Project::display_name)
+            .unwrap_or_else(|| tr!("sidebar.unknown_project"));
+        session_group_header(&theme).w_full().child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .min_w_0()
+                .child(icon("icons/folder.svg", 12.0, theme.text_tertiary))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme.text_tertiary)
+                        .child(project_name),
+                ),
+        )
     }
 
     fn begin_session_rename(
@@ -1229,14 +1336,12 @@ impl Waku {
             session.status,
             SessionStatus::Connecting | SessionStatus::Working
         );
-        let show_project = self.resolved_sidebar_project_filter().is_none();
-        let project_name = self
-            .state
-            .projects
-            .iter()
-            .find(|project| project.id == session.project_id)
-            .map(Project::display_name)
-            .unwrap_or_else(|| tr!("sidebar.unknown_project"));
+        let status_label = match session.status {
+            SessionStatus::Connecting | SessionStatus::Working => Some(tr!("sidebar.active")),
+            SessionStatus::Waiting => Some(tr!("sidebar.needs_you")),
+            SessionStatus::Failed => Some(tr!("sidebar.failed")),
+            SessionStatus::Idle => None,
+        };
         let time_label = session_time_label(session, unix_time());
         let time_color = if session.is_busy() {
             theme.text_tertiary
@@ -1308,7 +1413,15 @@ impl Waku {
                     .gap(px(6.0))
                     .overflow_hidden()
                     .line_height(px(18.0))
-                    .child(title)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .text_size(px(11.5))
+                    .line_height(px(15.0))
                     .when(working, |element| {
                         element.child(
                             icon(
@@ -1343,45 +1456,38 @@ impl Waku {
                             status_color(&theme, session.status),
                         ))
                     })
-                    .when(!show_project, |element| {
-                        element.when_some(time_label.clone(), |element, label| {
-                            element.child(
-                                div()
-                                    .flex_none()
-                                    .text_size(px(11.5))
-                                    .text_color(time_color)
-                                    .child(SharedString::from(label)),
-                            )
-                        })
+                    .when(
+                        session.has_started() && session.status == SessionStatus::Idle,
+                        |element| element.child(icon("icons/check.svg", 12.0, theme.success)),
+                    )
+                    .when_some(status_label, |element, label| {
+                        element.child(
+                            div()
+                                .flex_none()
+                                .text_color(status_color(&theme, session.status))
+                                .child(SharedString::from(label)),
+                        )
+                    })
+                    .child(icon(
+                        provider_icon(session.provider),
+                        11.0,
+                        provider_color(&theme, session.provider),
+                    ))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(theme.text_tertiary)
+                            .child(session.provider.short_name()),
+                    )
+                    .when_some(time_label, |element, label| {
+                        element.child(
+                            div()
+                                .flex_none()
+                                .text_color(time_color)
+                                .child(SharedString::from(label)),
+                        )
                     }),
             )
-            .when(show_project, |element| {
-                element.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(5.0))
-                        .text_size(px(11.5))
-                        .line_height(px(15.0))
-                        .child(icon("icons/folder.svg", 11.0, theme.text_tertiary))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_color(theme.text_tertiary)
-                                .child(SharedString::from(project_name)),
-                        )
-                        .when_some(time_label, |element, label| {
-                            element.child(
-                                div()
-                                    .flex_none()
-                                    .text_color(time_color)
-                                    .child(SharedString::from(label)),
-                            )
-                        }),
-                )
-            })
             .when(!renaming, |element| {
                 element
                     .track_focus(&row_focus)
@@ -1786,95 +1892,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn groups_sessions_by_calendar_period() {
-        let today = NaiveDate::from_ymd_opt(2026, 8, 12).unwrap();
-        let cases = [
-            ((2026, 8, 12), SessionDateGroup::Today),
-            ((2026, 8, 11), SessionDateGroup::Yesterday),
-            ((2026, 8, 10), SessionDateGroup::ThisWeek),
-            ((2026, 8, 1), SessionDateGroup::ThisMonth),
-            ((2026, 1, 1), SessionDateGroup::ThisYear),
-            ((2025, 12, 31), SessionDateGroup::More),
-        ];
-
-        for ((year, month, day), expected) in cases {
-            let session_date = NaiveDate::from_ymd_opt(year, month, day).unwrap();
-            assert_eq!(session_date_group_for_dates(session_date, today), expected);
-        }
-    }
-
-    #[test]
-    fn month_and_year_groups_respect_calendar_boundaries() {
-        let august_first = NaiveDate::from_ymd_opt(2026, 8, 1).unwrap();
-        assert_eq!(
-            session_date_group_for_dates(
-                NaiveDate::from_ymd_opt(2026, 7, 31).unwrap(),
-                august_first,
-            ),
-            SessionDateGroup::Yesterday
-        );
-        assert_ne!(
-            session_date_group_for_dates(
-                NaiveDate::from_ymd_opt(2026, 7, 31).unwrap(),
-                august_first,
-            ),
-            SessionDateGroup::ThisMonth
-        );
-
-        let january_first = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-        assert_eq!(
-            session_date_group_for_dates(
-                NaiveDate::from_ymd_opt(2025, 12, 31).unwrap(),
-                january_first,
-            ),
-            SessionDateGroup::Yesterday
-        );
-        assert_ne!(
-            session_date_group_for_dates(
-                NaiveDate::from_ymd_opt(2025, 12, 31).unwrap(),
-                january_first,
-            ),
-            SessionDateGroup::ThisYear
-        );
-    }
-
-    #[test]
-    fn future_sessions_stay_in_today() {
-        let today = NaiveDate::from_ymd_opt(2026, 8, 12).unwrap();
-        let tomorrow = NaiveDate::from_ymd_opt(2026, 8, 13).unwrap();
-        assert_eq!(
-            session_date_group_for_dates(tomorrow, today),
-            SessionDateGroup::Today
-        );
-    }
-
-    #[test]
-    fn collapsed_sidebar_group_keeps_only_its_header_and_spacer() {
-        let sessions = [Uuid::from_u128(1), Uuid::from_u128(2)];
-        let mut expanded = Vec::new();
-        append_sidebar_group_rows(&mut expanded, SessionDateGroup::Today, &sessions, false);
-        assert_eq!(
-            expanded,
-            vec![
-                SidebarRow::Header(SessionDateGroup::Today),
-                SidebarRow::Session(sessions[0]),
-                SidebarRow::Session(sessions[1]),
-                SidebarRow::GroupSpacer,
-            ]
-        );
-
-        let mut collapsed = Vec::new();
-        append_sidebar_group_rows(&mut collapsed, SessionDateGroup::Today, &sessions, true);
-        assert_eq!(
-            collapsed,
-            vec![
-                SidebarRow::Header(SessionDateGroup::Today),
-                SidebarRow::GroupSpacer,
-            ]
-        );
-    }
-
-    #[test]
     fn sidebar_recency_uses_last_reply_with_creation_fallback() {
         let project_id = Uuid::new_v4();
         let mut renamed_old_session = AgentSession::new(project_id, ProviderKind::Codex);
@@ -1904,18 +1921,56 @@ mod tests {
         assert!(sidebar_session_matches_project_filter(
             &session,
             None,
+            None,
             &HashSet::new()
         ));
         assert!(sidebar_session_matches_project_filter(
             &session,
             Some(SidebarProjectFilter::Project(project_a)),
+            None,
             &HashSet::new()
         ));
         assert!(!sidebar_session_matches_project_filter(
             &session,
             Some(SidebarProjectFilter::Project(project_b)),
+            None,
             &HashSet::new()
         ));
+    }
+
+    #[test]
+    fn provider_filter_keeps_only_matching_started_sessions() {
+        let project_id = Uuid::from_u128(1);
+        let mut codex = AgentSession::new(project_id, ProviderKind::Codex);
+        codex
+            .messages
+            .push(Message::new(MessageRole::User, "codex"));
+        let mut claude = AgentSession::new(project_id, ProviderKind::Claude);
+        claude
+            .messages
+            .push(Message::new(MessageRole::User, "claude"));
+        assert!(sidebar_session_matches_project_filter(
+            &codex,
+            None,
+            Some(ProviderKind::Codex),
+            &HashSet::new()
+        ));
+        assert!(!sidebar_session_matches_project_filter(
+            &claude,
+            None,
+            Some(ProviderKind::Codex),
+            &HashSet::new()
+        ));
+    }
+
+    #[test]
+    fn status_filter_matches_orca_lifecycle_groups() {
+        assert!(SidebarStatusFilter::Active.matches(SessionStatus::Working));
+        assert!(SidebarStatusFilter::Active.matches(SessionStatus::Connecting));
+        assert!(SidebarStatusFilter::NeedsYou.matches(SessionStatus::Waiting));
+        assert!(SidebarStatusFilter::Done.matches(SessionStatus::Idle));
+        assert!(SidebarStatusFilter::Failed.matches(SessionStatus::Failed));
+        assert!(!SidebarStatusFilter::Done.matches(SessionStatus::Working));
     }
 
     #[test]
@@ -1925,11 +1980,13 @@ mod tests {
         assert!(!sidebar_session_matches_project_filter(
             &session,
             None,
+            None,
             &HashSet::new()
         ));
         assert!(!sidebar_session_matches_project_filter(
             &session,
             Some(SidebarProjectFilter::Project(project_id)),
+            None,
             &HashSet::new()
         ));
     }
@@ -1956,21 +2013,27 @@ mod tests {
             Project::from_path(dirs::home_dir().unwrap().join(".waku/2026-08-12/b")),
             Project::from_path(std::path::PathBuf::from("D:/project")),
         ];
+        session_a.project_id = projects[0].id;
+        session_b.project_id = projects[1].id;
+        ordinary_session.project_id = projects[2].id;
         let projectless_ids = collect_projectless_project_ids(&projects);
 
         assert!(sidebar_session_matches_project_filter(
             &session_a,
             Some(SidebarProjectFilter::Projectless),
+            None,
             &projectless_ids,
         ));
         assert!(sidebar_session_matches_project_filter(
             &session_b,
             Some(SidebarProjectFilter::Projectless),
+            None,
             &projectless_ids,
         ));
         assert!(!sidebar_session_matches_project_filter(
             &ordinary_session,
             Some(SidebarProjectFilter::Projectless),
+            None,
             &projectless_ids,
         ));
     }

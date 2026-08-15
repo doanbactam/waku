@@ -2,6 +2,7 @@
 
 import { $ } from "bun";
 import { watch, type FSWatcher } from "node:fs";
+import { copyFile, mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
@@ -19,6 +20,23 @@ const appPath = isWindows
 const watchedDirectories = ["src", "assets", "resources", "locales"];
 const watchedFiles = ["Cargo.toml", "Cargo.lock", "build.rs"];
 const rebuildDebounceMs = 1_000;
+
+async function syncRuntimeResources(): Promise<void> {
+  if (isMac) return;
+  const profileDir = join(targetDir, "debug");
+  await mkdir(join(profileDir, "resources", "computer-use"), { recursive: true });
+  await mkdir(join(profileDir, "resources", "skills", "waku-computer-use"), {
+    recursive: true,
+  });
+  await copyFile(
+    join(root, "resources", "computer-use", "pi-extension.ts"),
+    join(profileDir, "resources", "computer-use", "pi-extension.ts"),
+  );
+  await copyFile(
+    join(root, "resources", "computer-use", "SKILL.md"),
+    join(profileDir, "resources", "skills", "waku-computer-use", "SKILL.md"),
+  );
+}
 
 $.cwd(root);
 
@@ -50,6 +68,7 @@ async function build(): Promise<boolean> {
     console.error("[waku-dev] Build failed; keeping the current app open.");
     return false;
   }
+  await syncRuntimeResources();
   return true;
 }
 

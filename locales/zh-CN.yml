@@ -129,6 +129,13 @@ common.rename: 重命名
 session.new_task: 新任务
 sidebar.today: 今天
 sidebar.search: 搜索
+sidebar.filters: 筛选
+sidebar.provider: 提供商
+sidebar.status: 状态
+sidebar.active: 进行中
+sidebar.needs_you: 需要处理
+sidebar.done: 已完成
+sidebar.failed: 失败
 sidebar.yesterday: 昨天
 sidebar.this_week: 本周
 sidebar.this_month: 本月
@@ -141,8 +148,10 @@ sidebar.hours_ago: "%{count} 小时前"
 sidebar.days_ago: "%{count} 天前"
 sidebar.unknown_project: 未知项目
 sidebar.all_projects: 全部项目
+sidebar.all_providers: 全部提供商
+sidebar.projects: 项目
 sidebar.no_matching_tasks: 该项目下没有任务
-sidebar.show_all_projects: 显示全部项目
+sidebar.clear_filters: 清除筛选
 project.new_project: 新建项目…
 project.no_project: 不使用项目
 project.no_project_name: 无项目

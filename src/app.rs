@@ -1030,12 +1030,11 @@ pub struct Waku {
     /// One stable field reused across sidebar rows so virtualization never
     /// replaces the focused editor while a rename is in progress.
     session_rename_input: Entity<ComposerInput>,
-    /// Date groups the user has folded in the sidebar. This is intentionally
-    /// runtime-only, like transcript disclosure state.
-    sidebar_collapsed_groups: HashSet<SessionDateGroup>,
     /// Narrows history to one project. `None` shows every project.
-    /// Date headers below only group the remaining rows; they never filter.
+    /// Tasks are always grouped by project in the sidebar.
     sidebar_project_filter: Option<SidebarProjectFilter>,
+    sidebar_provider_filter: Option<ProviderKind>,
+    sidebar_status_filter: SidebarStatusFilter,
     sidebar_visible: bool,
     sidebar_width: f32,
     right_panel_visible: bool,
@@ -1263,7 +1262,7 @@ use components::*;
 pub use image_preview::init as init_image_preview_keys;
 pub use settings::init as init_settings_keys;
 pub use sidebar::init as init_sidebar_keys;
-use sidebar::{SessionDateGroup, SidebarProjectFilter, SidebarRow};
+use sidebar::{SidebarProjectFilter, SidebarRow, SidebarStatusFilter};
 pub use skills_page::init as init_skills_keys;
 use streaming::*;
 use transcript::*;
@@ -2266,8 +2265,9 @@ impl Waku {
                 session_navigation,
                 session_rename: None,
                 session_rename_input,
-                sidebar_collapsed_groups: HashSet::new(),
                 sidebar_project_filter: None,
+                sidebar_provider_filter: None,
+                sidebar_status_filter: SidebarStatusFilter::All,
                 sidebar_visible,
                 sidebar_width,
                 right_panel_visible,

@@ -141,6 +141,13 @@ session.new_task: 新規タスク
 
 sidebar.today: 今日
 sidebar.search: 検索
+sidebar.filters: フィルター
+sidebar.provider: プロバイダー
+sidebar.status: ステータス
+sidebar.active: アクティブ
+sidebar.needs_you: 要対応
+sidebar.done: 完了
+sidebar.failed: 失敗
 sidebar.yesterday: 昨日
 sidebar.this_week: 今週
 sidebar.this_month: 今月
@@ -153,8 +160,10 @@ sidebar.hours_ago: "%{count} 時間前"
 sidebar.days_ago: "%{count} 日前"
 sidebar.unknown_project: 不明なプロジェクト
 sidebar.all_projects: すべてのプロジェクト
+sidebar.all_providers: すべてのプロバイダー
+sidebar.projects: プロジェクト
 sidebar.no_matching_tasks: このプロジェクトにタスクはありません
-sidebar.show_all_projects: すべてのプロジェクトを表示
+sidebar.clear_filters: フィルターをクリア
 
 project.new_project: 新規プロジェクト…
 project.no_project: プロジェクトを使用しない
