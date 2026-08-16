@@ -23,6 +23,35 @@ pub struct CreatedWorktree {
     pub branch: String,
 }
 
+/// Result of checking the persisted workspace path before using it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Health {
+    Present,
+    Missing,
+    NotGitRepository,
+}
+
+/// Check a worktree without changing it. This is intentionally separate from
+/// `create`: an externally deleted worktree must be reported and repaired by a
+/// deliberate user action, never recreated behind the user's back.
+pub fn health(path: &Path) -> Health {
+    if !path.is_dir() {
+        return Health::Missing;
+    }
+    let Ok(output) = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(path)
+        .output()
+    else {
+        return Health::NotGitRepository;
+    };
+    if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true" {
+        Health::Present
+    } else {
+        Health::NotGitRepository
+    }
+}
+
 pub fn create(
     project_path: &Path,
     project_id: Uuid,
@@ -366,5 +395,12 @@ mod tests {
             "fix-project-worktree-picker"
         );
         assert!(worktree_slug(&"a".repeat(100)).len() <= MAX_SLUG_BYTES);
+    }
+
+    #[test]
+    fn health_distinguishes_a_worktree_deleted_outside_waku() {
+        let missing =
+            std::env::temp_dir().join(format!("waku-missing-worktree-{}", Uuid::new_v4()));
+        assert_eq!(health(&missing), Health::Missing);
     }
 }

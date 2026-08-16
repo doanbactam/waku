@@ -32,9 +32,9 @@ use crate::model::{
     ActivityItem, AgentSession, BackgroundWorkEvent, BackgroundWorkItem, BackgroundWorkKey,
     BackgroundWorkKind, BackgroundWorkStatus, Checkpoint, CheckpointStatus, ContextUsage,
     DriverEvent, FavoriteModel, InteractionMode, Message, MessageAttachment, MessageRole,
-    PendingPermission, Project, ProviderKind, ProviderModel, ProviderProbe, ProviderResumeCursor,
-    QueuedMessage, ReasoningBlock, RuntimeMode, SessionStatus, SessionWorkspace, TranscriptBlock,
-    TurnStatus, compact_path, unix_time, unix_time_millis,
+    PendingPermission, Project, ProviderAuthStatus, ProviderKind, ProviderModel, ProviderProbe,
+    ProviderResumeCursor, QueuedMessage, ReasoningBlock, RuntimeMode, SessionStatus,
+    SessionWorkspace, TranscriptBlock, TurnStatus, compact_path, unix_time, unix_time_millis,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -479,10 +479,17 @@ enum RightPanelSurface {
 }
 
 /// A turn whose checkpoint still has to be captured.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum CheckpointCaptureKind {
+    Start,
+    End,
+}
+
 struct PendingCheckpointCapture {
     session_id: Uuid,
     turn_count: usize,
     project_path: PathBuf,
+    kind: CheckpointCaptureKind,
 }
 
 /// Sessions between accepting a submission and handing it to a provider.
@@ -833,6 +840,10 @@ pub struct Waku {
     /// CLI version per provider, probed off-thread. Missing key means the
     /// probe has not answered yet; `None` means it ran and found nothing.
     provider_versions: HashMap<ProviderKind, Option<String>>,
+    /// Last compacted runtime error per provider. This is deliberately kept in
+    /// memory: diagnostics must be useful without turning provider output into
+    /// another persisted transcript field.
+    provider_last_errors: HashMap<ProviderKind, String>,
     provider_version_tx: Sender<(ProviderKind, Option<String>)>,
     provider_version_events: Receiver<(ProviderKind, Option<String>)>,
     /// Providers with a version probe in flight, so a re-detect cannot stack
@@ -1188,7 +1199,12 @@ pub struct Waku {
     /// The (session, turn) captures currently running, so a repeated request —
     /// a turn that finishes while its own capture is still going — does not
     /// fork a second `git add -A` over the same worktree.
-    checkpoint_captures_in_flight: HashSet<(Uuid, usize)>,
+    checkpoint_captures_in_flight: HashSet<(Uuid, usize, CheckpointCaptureKind)>,
+    /// Reachable Git objects retained by Waku checkpoint refs. Filled by the
+    /// background maintenance pass; settings reads the last value only.
+    checkpoint_storage: Option<checkpoint::StorageStats>,
+    checkpoint_maintenance_pending: bool,
+    checkpoint_maintenance_requested: bool,
     /// Clock for the idle-session sweep, so the check costs one comparison per
     /// frame instead of a scan.
     last_idle_session_sweep: Instant,
@@ -1530,6 +1546,21 @@ impl Waku {
         let composer_draft_store = ComposerDraftStore::for_state_path(&state_path);
         let composer_drafts = composer_draft_store.load().unwrap_or_default();
         let mut state = store.load_or_fresh(cwd);
+        // A checkpoint journal is intentionally tiny, so hydrate only the
+        // sessions that need replay. The end capture must be able to attach its
+        // result even when the session was not the one selected at launch.
+        let checkpoint_journal = store.checkpoint_journal_entries().unwrap_or_default();
+        for entry in &checkpoint_journal {
+            if let Some(session) = state
+                .sessions
+                .iter_mut()
+                .find(|session| session.id == entry.session_id)
+            {
+                let _ = store.hydrate(session);
+            } else {
+                let _ = store.clear_checkpoint_journal_for_session(entry.session_id);
+            }
+        }
         crate::i18n::set_language(state.language);
         let analytics = crate::analytics::Analytics::new(
             state.language.locale(),
@@ -1660,6 +1691,7 @@ impl Waku {
                     session_id: session.id,
                     turn_count,
                     project_path,
+                    kind: CheckpointCaptureKind::End,
                 });
             }
             for message in &mut session.messages {
@@ -1706,6 +1738,27 @@ impl Waku {
                 },
             )
             .collect::<Vec<_>>();
+        for entry in checkpoint_journal {
+            if state
+                .sessions
+                .iter()
+                .any(|session| session.id == entry.session_id)
+            {
+                interrupted_turn_checkpoints.push(PendingCheckpointCapture {
+                    session_id: entry.session_id,
+                    turn_count: entry.turn_count,
+                    project_path: entry.project_path,
+                    kind: match entry.phase {
+                        crate::persistence::CheckpointJournalPhase::Start => {
+                            CheckpointCaptureKind::Start
+                        }
+                        crate::persistence::CheckpointJournalPhase::End => {
+                            CheckpointCaptureKind::End
+                        }
+                    },
+                });
+            }
+        }
         let (provider_probe_tx, provider_probe_events) = unbounded();
         let (provider_version_tx, provider_version_events) = unbounded();
         let (provider_detection_tx, provider_detection_events) = unbounded();
@@ -2174,6 +2227,7 @@ impl Waku {
                 provider_model_discoveries: HashSet::new(),
                 provider_model_discoveries_pending: HashSet::new(),
                 provider_versions: HashMap::new(),
+                provider_last_errors: HashMap::new(),
                 provider_version_tx,
                 provider_version_events,
                 provider_version_probes_pending: HashSet::new(),
@@ -2360,6 +2414,9 @@ impl Waku {
                 checkpoint_ref_prefetch: Cell::new(None),
                 pending_checkpoint_captures: interrupted_turn_checkpoints,
                 checkpoint_captures_in_flight: HashSet::new(),
+                checkpoint_storage: None,
+                checkpoint_maintenance_pending: false,
+                checkpoint_maintenance_requested: false,
                 last_idle_session_sweep: Instant::now(),
                 transcript_anchor: Cell::new(None),
                 transcript_anchor_end_space: Rc::new(Cell::new(Pixels::ZERO)),
@@ -2390,6 +2447,7 @@ impl Waku {
         // first frame.
         entity.update(cx, |this, cx| {
             this.start_pending_checkpoint_captures(cx);
+            this.start_checkpoint_maintenance(cx);
             // The autocomplete indexes prefetch alongside, so typing `/` or
             // `@` into the very first prompt already has data to draw.
             this.refresh_composer_sources(cx);

@@ -17,6 +17,7 @@ fn prepare_submission(
     session_id: Uuid,
     prompt: &str,
     turn_count: usize,
+    checkpoint_journal_path: PathBuf,
 ) -> anyhow::Result<PreparedSubmission> {
     let workspace = match workspace {
         SessionWorkspace::NewWorktree { base_branch } => {
@@ -38,13 +39,44 @@ fn prepare_submission(
         workspace => workspace,
     };
     let project_path = workspace.path().unwrap_or(&project.path);
+    if matches!(workspace, SessionWorkspace::Worktree { .. })
+        && crate::worktree::health(project_path) != crate::worktree::Health::Present
+    {
+        anyhow::bail!(
+            "the saved worktree is unavailable: {}",
+            project_path.display()
+        );
+    }
 
     // Every turn gets its own immutable starting snapshot. Reusing the prior
     // response's ending ref would attribute branch switches or terminal edits
     // made between turns to the next response.
+    let _ = crate::persistence::StateStore::begin_checkpoint_journal_at(
+        &checkpoint_journal_path,
+        session_id,
+        turn_count,
+        crate::persistence::CheckpointJournalPhase::Start,
+        project_path,
+    );
     let checkpoint_warning = checkpoint::capture_turn_start(project_path, session_id, turn_count)
         .err()
         .map(|error| tr!("errors.capture_pre_turn_checkpoint", error = error));
+    if let Some(error) = checkpoint_warning.as_deref() {
+        let _ = crate::persistence::StateStore::fail_checkpoint_journal_at(
+            &checkpoint_journal_path,
+            session_id,
+            turn_count,
+            crate::persistence::CheckpointJournalPhase::Start,
+            error,
+        );
+    } else {
+        let _ = crate::persistence::StateStore::complete_checkpoint_journal_at(
+            &checkpoint_journal_path,
+            session_id,
+            turn_count,
+            crate::persistence::CheckpointJournalPhase::Start,
+        );
+    }
 
     // Process startup can synchronously resolve executables, bind sockets,
     // and spawn children. It belongs behind the same animated preparation
@@ -980,13 +1012,85 @@ impl Waku {
         }
     }
 
-    fn checkpoint_capture_pending(&self, session_id: Uuid, turn_count: usize) -> bool {
+    fn checkpoint_capture_pending(
+        &self,
+        session_id: Uuid,
+        turn_count: usize,
+        kind: CheckpointCaptureKind,
+    ) -> bool {
         self.checkpoint_captures_in_flight
-            .contains(&(session_id, turn_count))
-            || self
-                .pending_checkpoint_captures
+            .contains(&(session_id, turn_count, kind))
+            || self.pending_checkpoint_captures.iter().any(|capture| {
+                capture.session_id == session_id
+                    && capture.turn_count == turn_count
+                    && capture.kind == kind
+            })
+    }
+
+    /// Reconcile checkpoint refs against persisted sessions and measure their
+    /// reachable Git objects. Both operations shell out and are intentionally
+    /// one background pass per repository rather than one probe per session.
+    pub(super) fn start_checkpoint_maintenance(&mut self, cx: &mut Context<Self>) {
+        if self.checkpoint_maintenance_pending {
+            self.checkpoint_maintenance_requested = true;
+            return;
+        }
+        let mut project_sessions = HashMap::<PathBuf, HashSet<Uuid>>::new();
+        for project in self
+            .state
+            .projects
+            .iter()
+            .filter(|project| !project.is_projectless())
+        {
+            let live_sessions = self
+                .state
+                .sessions
                 .iter()
-                .any(|capture| capture.session_id == session_id && capture.turn_count == turn_count)
+                .filter(|session| session.project_id == project.id)
+                .map(|session| session.id)
+                .collect::<HashSet<_>>();
+            project_sessions
+                .entry(project.path.clone())
+                .or_default()
+                .extend(live_sessions);
+        }
+        self.checkpoint_maintenance_pending = true;
+        cx.spawn(async move |waku, cx| {
+            let stats = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut repositories = HashMap::<PathBuf, HashSet<Uuid>>::new();
+                    for (project_path, live_sessions) in project_sessions {
+                        let repository =
+                            checkpoint::repository_root(&project_path).unwrap_or(project_path);
+                        repositories
+                            .entry(repository)
+                            .or_default()
+                            .extend(live_sessions);
+                    }
+                    let mut total = checkpoint::StorageStats::default();
+                    for (path, live_sessions) in repositories {
+                        let _ = checkpoint::gc_session_refs(&path, &live_sessions);
+                        if let Ok(stats) = checkpoint::storage_stats(&path) {
+                            total.ref_count += stats.ref_count;
+                            total.object_count += stats.object_count;
+                            total.bytes += stats.bytes;
+                        }
+                    }
+                    total
+                })
+                .await;
+            let _ = waku.update(cx, |waku, cx| {
+                waku.checkpoint_storage = Some(stats);
+                waku.checkpoint_maintenance_pending = false;
+                let rerun = std::mem::take(&mut waku.checkpoint_maintenance_requested);
+                if rerun {
+                    waku.start_checkpoint_maintenance(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn ending_checkpoint_pending(&self, session_id: Uuid) -> bool {
@@ -996,7 +1100,13 @@ impl Waku {
             .find(|session| session.id == session_id)
             .and_then(|session| session.turns.last())
             .filter(|turn| turn.status != TurnStatus::Running)
-            .is_some_and(|turn| self.checkpoint_capture_pending(session_id, turn.turn_count))
+            .is_some_and(|turn| {
+                self.checkpoint_capture_pending(
+                    session_id,
+                    turn.turn_count,
+                    CheckpointCaptureKind::End,
+                )
+            })
     }
 
     fn defer_queue_drain(&mut self, session_id: Uuid) {
@@ -1029,7 +1139,7 @@ impl Waku {
         else {
             return;
         };
-        if self.checkpoint_capture_pending(session_id, turn_count) {
+        if self.checkpoint_capture_pending(session_id, turn_count, CheckpointCaptureKind::End) {
             return;
         }
         let Some(project_path) = self
@@ -1038,11 +1148,18 @@ impl Waku {
         else {
             return;
         };
+        let _ = self.store.begin_checkpoint_journal(
+            session_id,
+            turn_count,
+            crate::persistence::CheckpointJournalPhase::End,
+            &project_path,
+        );
         self.pending_checkpoint_captures
             .push(PendingCheckpointCapture {
                 session_id,
                 turn_count,
                 project_path,
+                kind: CheckpointCaptureKind::End,
             });
     }
 
@@ -1054,31 +1171,64 @@ impl Waku {
     /// affordance appears when `invalidate_checkpoint_refs` prompts the next
     /// prefetch to notice the new ref.
     pub(super) fn start_pending_checkpoint_captures(&mut self, cx: &mut Context<Self>) {
-        for request in std::mem::take(&mut self.pending_checkpoint_captures) {
+        let mut requests = std::mem::take(&mut self.pending_checkpoint_captures);
+        // A failed turn-start capture can leave both journal phases pending.
+        // End captures depend on the start ref for branch-aware diffs, so keep
+        // all starts ahead of ends and defer an end while its start is live.
+        requests.sort_by_key(|request| matches!(request.kind, CheckpointCaptureKind::End));
+        for request in requests {
             let PendingCheckpointCapture {
                 session_id,
                 turn_count,
                 project_path,
+                kind,
             } = request;
+            if kind == CheckpointCaptureKind::End
+                && self.checkpoint_capture_pending(
+                    session_id,
+                    turn_count,
+                    CheckpointCaptureKind::Start,
+                )
+            {
+                self.pending_checkpoint_captures
+                    .push(PendingCheckpointCapture {
+                        session_id,
+                        turn_count,
+                        project_path,
+                        kind,
+                    });
+                continue;
+            }
             if !self
                 .checkpoint_captures_in_flight
-                .insert((session_id, turn_count))
+                .insert((session_id, turn_count, kind))
             {
                 continue;
             }
             cx.spawn(async move |waku, cx| {
-                let captured =
-                    cx.background_executor()
-                        .spawn({
-                            let project_path = project_path.clone();
-                            async move {
-                                checkpoint::capture_turn(&project_path, session_id, turn_count)
+                let captured = cx
+                    .background_executor()
+                    .spawn({
+                        let project_path = project_path.clone();
+                        async move {
+                            match kind {
+                                CheckpointCaptureKind::Start => checkpoint::capture_turn_start(
+                                    &project_path,
+                                    session_id,
+                                    turn_count,
+                                )
+                                .map(|()| None),
+                                CheckpointCaptureKind::End => {
+                                    checkpoint::capture_turn(&project_path, session_id, turn_count)
+                                        .map(Some)
+                                }
                             }
-                        })
-                        .await;
+                        }
+                    })
+                    .await;
                 waku.update(cx, |waku, cx| {
                     waku.checkpoint_captures_in_flight
-                        .remove(&(session_id, turn_count));
+                        .remove(&(session_id, turn_count, kind));
                     let selected = waku.state.selected_session == Some(session_id);
                     if selected {
                         waku.sync_transcript_rows();
@@ -1088,11 +1238,38 @@ impl Waku {
                     } else {
                         Vec::new()
                     };
-                    let checkpoint = match captured {
-                        Ok(checkpoint) => checkpoint,
-                        Err(error) => {
+                    let checkpoint = match (kind, captured) {
+                        (CheckpointCaptureKind::Start, Ok(_)) => {
+                            let _ = waku.store.complete_checkpoint_journal(
+                                session_id,
+                                turn_count,
+                                crate::persistence::CheckpointJournalPhase::Start,
+                            );
+                            None
+                        }
+                        (CheckpointCaptureKind::End, Ok(Some(checkpoint))) => {
+                            let _ = waku.store.complete_checkpoint_journal(
+                                session_id,
+                                turn_count,
+                                crate::persistence::CheckpointJournalPhase::End,
+                            );
+                            Some(checkpoint)
+                        }
+                        (_, Err(error)) => {
+                            let phase = match kind {
+                                CheckpointCaptureKind::Start => {
+                                    crate::persistence::CheckpointJournalPhase::Start
+                                }
+                                CheckpointCaptureKind::End => {
+                                    crate::persistence::CheckpointJournalPhase::End
+                                }
+                            };
+                            let message = error.to_string();
+                            let _ = waku
+                                .store
+                                .fail_checkpoint_journal(session_id, turn_count, phase, &message);
                             waku.show_toast(tr!("errors.capture_turn_checkpoint", error = error));
-                            Checkpoint {
+                            (kind == CheckpointCaptureKind::End).then_some(Checkpoint {
                                 turn_count,
                                 git_ref: checkpoint::checkpoint_ref(session_id, turn_count),
                                 status: CheckpointStatus::Error,
@@ -1100,12 +1277,14 @@ impl Waku {
                                 additions: 0,
                                 deletions: 0,
                                 created_at: unix_time(),
-                            }
+                            })
                         }
+                        (_, Ok(None)) => None,
                     };
                     waku.invalidate_checkpoint_refs();
                     let mut attached_turn_id = None;
-                    if let Some(session) = waku.state.session_mut(session_id)
+                    if let Some(checkpoint) = checkpoint
+                        && let Some(session) = waku.state.session_mut(session_id)
                         && let Some(turn) = session
                             .turns
                             .iter_mut()
@@ -2114,10 +2293,9 @@ impl Waku {
         // driver reports the outcome asynchronously via SteerAccepted or
         // SteerRejected once it is handed off.
         let steerable = session.status != SessionStatus::Connecting
-            && self
-                .runtimes
-                .get(&session.id)
-                .is_some_and(|runtime| runtime.driver.supports_steer());
+            && self.runtimes.get(&session.id).is_some_and(|runtime| {
+                session.provider.capabilities().steer && runtime.driver.supports_steer()
+            });
         if !steerable {
             self.enqueue_follow_up_submission(session.id, submission, cx);
             return;
@@ -2252,6 +2430,18 @@ impl Waku {
             self.enqueue_follow_up_submission(session_id, submission, cx);
             return;
         }
+        let missing_worktree = match &session.workspace {
+            SessionWorkspace::Worktree { path, .. } if !path.is_dir() => Some(path.clone()),
+            _ => None,
+        };
+        if let Some(path) = missing_worktree {
+            self.show_toast(tr!(
+                "errors.worktree_unavailable",
+                path = path.display().to_string()
+            ));
+            cx.notify();
+            return;
+        }
         let prompt = submission.prompt.clone();
         let human_prompt = submission.human_prompt();
         let has_input = !submission
@@ -2357,6 +2547,7 @@ impl Waku {
         cx.notify();
 
         let preparation_prompt = human_prompt;
+        let checkpoint_journal_path = self.store.database_path();
         cx.spawn(async move |waku, cx| {
             let prepared = cx
                 .background_executor()
@@ -2368,6 +2559,7 @@ impl Waku {
                         session_id,
                         &preparation_prompt,
                         next_turn_count,
+                        checkpoint_journal_path,
                     )
                 })
                 .await;

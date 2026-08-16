@@ -556,6 +556,15 @@ impl Waku {
             DriverEvent::Error(error) => {
                 let error = compact_driver_error(&error);
                 runtime.last_driver_error = Some(error.clone());
+                if let Some(provider) = self
+                    .state
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id)
+                    .map(|session| session.provider)
+                {
+                    self.provider_last_errors.insert(provider, error.clone());
+                }
                 if self.state.selected_session == Some(session_id) {
                     self.show_toast(error.clone());
                 }
