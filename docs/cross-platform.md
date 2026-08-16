@@ -34,8 +34,9 @@ All platform-specific code lives behind `cfg(target_os = …)` arms in
 `src/platform.rs`, `src/browser.rs`, `src/updater.rs`, `src/i18n.rs`,
 `src/usage.rs`, and `src/computer_use.rs`. The non-macOS arms are not fake —
 they either implement the behavior with a native equivalent (Linux `gio trash`,
-`xdg-open`, `notify-send`, `gsettings`; Windows `powershell` + WinRT/UIAutomation
-probes) or return a clear "not available" that the UI surfaces as a message.
+`xdg-open`, `notify-send`, `gsettings`, and AT-SPI/XDG portal probes; Windows
+PowerShell for the reduce-motion probe and a Rust UI Automation helper) or
+return a clear "not available" that the UI surfaces as a message.
 
 ## Gated surfaces and their native backends
 
@@ -83,16 +84,16 @@ cross-platform by `js_repl_server_path`, `pi_extension_path`, and
 directory next to the executable (the bundle scripts copy them there).
 
 **Native accessibility backend** — `probe_permissions` and
-`mcp_server_command` — use the platform backend. `@oai/sky` itself ships
-separate backends per OS:
+`mcp_server_command` — use the platform backend. Each OS ships its own native
+helper around a shared MCP contract:
 
 - **Linux**: Waku uses AT-SPI / AT-SPI2 for the accessibility tree and the
   XDG Screenshot/RemoteDesktop portals for Wayland-safe capture and input. The
-  backend is shipped as the Rust `waku_computer_use_linux` helper; it never
-  shells out to external scripting or `xdotool`.
+  backend is shipped as the Rust `waku_computer_use_linux` helper in
+  `src/bin`; it never shells out to external scripting or `xdotool`.
 - **Windows**: UI Automation, GDI desktop capture, and `SendInput`, shipped
-  by the Rust `waku_computer_use_windows` helper. The helper is the Windows
-  equivalent of the macOS Swift and Linux portal backends.
+  by the Rust `waku_computer_use_windows` helper in `src/bin`. The helper is
+  the Windows equivalent of the macOS Swift and Linux portal backends.
 
 These are entirely different native APIs, not a port of the Swift helper.
 The MCP/`sky` contract is shared, while target resolution, capture, input,
