@@ -63,8 +63,7 @@ Waku's native surfaces have different maturity per platform:
 | --- | :---: | :---: | :---: |
 | App shell (window, sidebar, transcript, composer) | ✅ | ✅ builds, runs | ✅ builds |
 | Browser surface (right panel) | ✅ | ✅ X11 / gated on Wayland (1) | ✅ builds (WebView2) |
-| Computer Use (resources, REPL, skills) | ✅ | ✅ builds | ✅ builds |
-| Computer Use (native accessibility backend) | ✅ | not yet (AT-SPI) | not yet (UI Automation) |
+| Computer Use | ✅ | ✅ (AT-SPI + XDG portals) | ✅ (UI Automation) |
 | In-app updater (Sparkle) | ✅ | not yet | not yet (WinSparkle planned) |
 | Packaging | `.app` | `.desktop` + binary | portable `.exe` (MSI via WiX) |
 
@@ -77,10 +76,6 @@ is headless).
    adapter. Wayland remains gated until GPUI exposes a GTK container or
    foreign-subsurface host. See [docs/cross-platform.md](docs/cross-platform.md)
    for the required native packages and details.
-
-## Sponsorship
-
-You can support the project development via [GitHub Sponsors](https://github.com/sponsors/egoist).
 
 ## License
 

@@ -19,12 +19,13 @@ macOS is the canonical development platform. Linux and Windows also build:
 - **Windows**: install the MSVC toolchain and run `bun run dev`, which builds
   `target/debug/waku.exe`.
 
-Some macOS-native surfaces are gated off on Linux/Windows today: the Linux
-browser (GPUI/wry handle mismatch), the Computer Use native accessibility
-backend (needs AT-SPI on Linux, UI Automation on Windows), and the Sparkle
-updater. The Windows browser (WebView2) and Computer Use portable resources
-(REPL, Pi extension, skills) build cross-platform; see
-[Platform support](../README.md#platform-support) and
+Two surfaces remain gated off Linux/Windows today: the Linux browser on
+Wayland (GPUI has no GTK container or foreign-subsurface seam yet; the X11
+path uses an XCB→Xlib adapter) and the Sparkle updater. The browser surface
+(WebView2 on Windows, WebKitGTK on Linux/X11) and Computer Use — portable
+resources (REPL, Pi extension, skills) plus native per-OS accessibility
+backends (macOS Swift, Linux AT-SPI, Windows UI Automation) — build and run
+cross-platform; see [Platform support](../README.md#platform-support) and
 [docs/cross-platform.md](docs/cross-platform.md).
 
 Install dependencies and start the development watcher from the repository
