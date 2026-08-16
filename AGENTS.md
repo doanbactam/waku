@@ -58,6 +58,36 @@
   interactive targets enough hit area — extend the hit region rather than
   shrinking to the glyph.
 
+### Keyboard accessibility (quy chuẩn chung, áp dụng cả macOS/Windows/Linux)
+
+Rules live in `src/ui/accessibility.rs`; keep them in sync with this section.
+The intent is one native-feeling convention everywhere, not platform-specific
+behavior.
+
+- **Primary modifier**: read shortcuts via `secondary()` or KeyBinding
+  `secondary-...` — Cmd on macOS, Ctrl on Windows/Linux. **Never use
+  `Modifiers::platform` for a shortcut**: on Linux it is the Super key, on
+  Windows the Win key, not the primary. (This already bit copy/paste and
+  activation guards as a real cross-platform bug.)
+- **Activating a control**: Enter or Space with no primary modifier. Prefer the
+  `keyboard_activate` helper (or its `is_activation_keystroke` predicate) over
+  hand-written `on_key_down`, so every widget shares one guard and stops
+  propagation the same way. New controls should route through
+  `keyboard_activate`.
+- **Moving focus**: Tab/Shift-Tab move focus between controls app-wide on all
+  three platforms (bound once at the `"Waku"` surface via `focus_visible`-driven
+  `window.focus_next`/`focus_prev`). Deeper contexts that own Tab for their own
+  list navigation (command palette, autocomplete, a menu's filter field, the
+  terminal) shadow it with higher-precedence bindings — keep that shadowing
+  working; don't rebind Tab locally.
+- **Focus ring**: use the `focus_ring` helper for the `tab_index` + `focus_visible`
+  pair. GPUI shows the ring only while focus arrived by keyboard (not mouse) —
+  native on all platforms; don't degrade it to a permanent outline.
+- **List navigation**: arrow keys with `home`/`end`; **escape** cancels/closes;
+  the reduce-motion rule below still applies.
+- Never encode meaning in color/hover/motion alone, and make any
+  hover-revealed action keyboard-reachable too.
+
 ## Product reference
 
 - Use [T3 Code](https://github.com/pingdotgg/t3code) source code on github as a reference when a task

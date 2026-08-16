@@ -161,7 +161,10 @@ sidebar.days_ago: "%{count} 日前"
 sidebar.unknown_project: 不明なプロジェクト
 sidebar.all_projects: すべてのプロジェクト
 sidebar.all_providers: すべてのプロバイダー
+sidebar.all_statuses: すべてのステータス
 sidebar.projects: プロジェクト
+sidebar.task_count_one: "%{count} 件のタスク"
+sidebar.task_count_many: "%{count} 件のタスク"
 sidebar.no_matching_tasks: このプロジェクトにタスクはありません
 sidebar.clear_filters: フィルターをクリア
 

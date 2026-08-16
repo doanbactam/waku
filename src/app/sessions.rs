@@ -458,6 +458,24 @@ impl Waku {
         }
     }
 
+    pub(super) fn focus_next_action(
+        &mut self,
+        _: &FocusNext,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus_next(cx);
+    }
+
+    pub(super) fn focus_prev_action(
+        &mut self,
+        _: &FocusPrev,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus_prev(cx);
+    }
+
     pub(super) fn navigate_back_action(
         &mut self,
         _: &NavigateBack,

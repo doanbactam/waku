@@ -64,11 +64,11 @@ use crate::ui::{
     provider_color, provider_icon, status_color,
 };
 use crate::{
-    CancelTurn, CloseFind, CloseWindow, CopySelection, FindNext, FindPrevious, FocusComposer,
-    NavigateBack, NavigateForward, NewProject, NewSession, OpenFind, OpenFindReplace, OpenSettings,
-    ReplaceAllMatches, SaveFile, ToggleCommandPalette, ToggleFindCaseSensitive, ToggleFindRegex,
-    ToggleFindWholeWord, ToggleFpsCounter, ToggleModelPicker, ToggleRightPanel, ToggleSidebar,
-    ToggleUsagePanel,
+    CancelTurn, CloseFind, CloseWindow, CopySelection, FindNext, FindPrevious, FocusComposer, FocusNext,
+    FocusPrev, NavigateBack, NavigateForward, NewProject, NewSession, OpenFind, OpenFindReplace,
+    OpenSettings, ReplaceAllMatches, SaveFile, ToggleCommandPalette, ToggleFindCaseSensitive,
+    ToggleFindRegex, ToggleFindWholeWord, ToggleFpsCounter, ToggleModelPicker, ToggleRightPanel,
+    ToggleSidebar, ToggleUsagePanel,
 };
 
 const TRAFFIC_LIGHT_CLEARANCE: f32 = if cfg!(target_os = "macos") { 86.0 } else { 0.0 };

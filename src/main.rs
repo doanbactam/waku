@@ -83,6 +83,8 @@ actions!(
         ToggleFpsCounter,
         NavigateBack,
         NavigateForward,
+        FocusNext,
+        FocusPrev,
         FocusComposer,
         ToggleModelPicker,
         ToggleUsagePanel,
@@ -180,6 +182,8 @@ fn main() {
                 KeyBinding::new("secondary-s", SaveFile, None),
                 KeyBinding::new("escape", CancelTurn, Some("Waku")),
                 KeyBinding::new("secondary-c", CopySelection, Some("Waku")),
+                KeyBinding::new("tab", FocusNext, Some("Waku")),
+                KeyBinding::new("shift-tab", FocusPrev, Some("Waku")),
                 // Find and replace in the right panel's file editor, on the
                 // conventional platform bindings. Secondary-G cycles matches
                 // from the editor without moving focus to the bar.

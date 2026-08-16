@@ -13,7 +13,7 @@ use gpui::{PathBuilder, relative};
 use super::*;
 use crate::usage_history::{
     self, MONTHLY_WINDOW, MonthSlice, PricingStatus, ProjectSlice, ProviderDay, UsageHistory,
-    UsageProvider, UsageWindow, WINDOW_CHOICES,
+    UsageProvider, UsageWindow, USAGE_PROVIDER_COUNT, WINDOW_CHOICES,
 };
 
 /// Rendered chart height, matching T3's `h-56` plot.
@@ -35,6 +35,9 @@ fn provider_kind(provider: UsageProvider) -> ProviderKind {
     match provider {
         UsageProvider::Claude => ProviderKind::Claude,
         UsageProvider::Codex => ProviderKind::Codex,
+        UsageProvider::OpenCode => ProviderKind::OpenCode,
+        UsageProvider::Grok => ProviderKind::Grok,
+        UsageProvider::Pi => ProviderKind::Pi,
     }
 }
 
@@ -288,34 +291,37 @@ impl Waku {
             (UsageViewMode::Projects, tr!("usage.projects")),
         ] {
             let selected = self.usage_view == view;
-            view_options = view_options.child(
-                div()
-                    .id(SharedString::from(format!(
-                        "usage-view-{}",
-                        label.to_ascii_lowercase()
-                    )))
-                    .tab_index(0)
-                    .focus_visible(|style| style.border_1().border_color(theme.accent))
-                    .h(px(26.0))
-                    .px(px(11.0))
-                    .flex()
-                    .items_center()
-                    .cursor_default()
-                    .text_size(px(10.5))
-                    .text_color(if selected {
-                        theme.text
-                    } else {
-                        theme.text_secondary
-                    })
-                    .when(selected, |element| element.bg(theme.overlay))
-                    .when(!selected, |element| {
-                        element.hover(|element| element.text_color(theme.text))
-                    })
-                    .child(label)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_usage_view(view, cx);
-                    })),
-            );
+            let option = div()
+                .id(SharedString::from(format!(
+                    "usage-view-{}",
+                    label.to_ascii_lowercase()
+                )))
+                .tab_index(0)
+                .focus_visible(|style| style.border_1().border_color(theme.accent))
+                .h(px(26.0))
+                .px(px(11.0))
+                .flex()
+                .items_center()
+                .cursor_default()
+                .text_size(px(10.5))
+                .text_color(if selected {
+                    theme.text
+                } else {
+                    theme.text_secondary
+                })
+                .when(selected, |element| element.bg(theme.overlay))
+                .when(!selected, |element| {
+                    element.hover(|element| element.text_color(theme.text))
+                })
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_usage_view(view, cx);
+                }));
+            view_options = view_options.child(crate::ui::accessibility::keyboard_activate(
+                option, cx, move |this, _, cx| {
+                    this.set_usage_view(view, cx);
+                },
+            ));
         }
 
         // The statement view fixes its own range, so the window selector
@@ -375,28 +381,34 @@ impl Waku {
         } else {
             icon("icons/rotate-cw.svg", 12.0, theme.text_tertiary).into_any_element()
         };
-        let refresh = div()
-            .id("usage-refresh")
-            .tab_index(0)
-            .focus_visible(|style| style.border_color(theme.accent))
-            .h(px(28.0))
-            .px(px(8.0))
-            .rounded(px(7.0))
-            .border_1()
-            .border_color(theme.border_strong)
-            .flex()
-            .items_center()
-            .cursor_default()
-            .hover(|element| element.bg(theme.overlay))
-            .tooltip(Tooltip::text(if pending {
-                tr!("usage.scanning")
-            } else {
-                tr!("usage.rescan")
-            }))
-            .child(refresh_glyph)
-            .on_click(cx.listener(|this, _, _, cx| {
+        let refresh = crate::ui::accessibility::keyboard_activate(
+            div()
+                .id("usage-refresh")
+                .tab_index(0)
+                .focus_visible(|style| style.border_color(theme.accent))
+                .h(px(28.0))
+                .px(px(8.0))
+                .rounded(px(7.0))
+                .border_1()
+                .border_color(theme.border_strong)
+                .flex()
+                .items_center()
+                .cursor_default()
+                .hover(|element| element.bg(theme.overlay))
+                .tooltip(Tooltip::text(if pending {
+                    tr!("usage.scanning")
+                } else {
+                    tr!("usage.rescan")
+                }))
+                .child(refresh_glyph)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.ensure_usage_history(true, cx);
+                })),
+            cx,
+            |this, _, cx| {
                 this.ensure_usage_history(true, cx);
-            }));
+            },
+        );
 
         let range_label = if monthly {
             tr!(
@@ -597,34 +609,37 @@ impl Waku {
             (UsageMetric::Tokens, tr!("usage.tokens_upper")),
         ] {
             let selected = metric == option;
-            toggle = toggle.child(
-                div()
-                    .id(SharedString::from(format!("usage-metric-{label}")))
-                    .tab_index(0)
-                    .focus_visible(|style| style.border_1().border_color(theme.accent))
-                    .h(px(22.0))
-                    .px(px(9.0))
-                    .flex()
-                    .items_center()
-                    .cursor_default()
-                    .text_size(px(9.0))
-                    .text_color(if selected {
-                        theme.text
-                    } else {
-                        theme.text_secondary
-                    })
-                    .when(selected, |element| element.bg(theme.overlay))
-                    .when(!selected, |element| {
-                        element.hover(|element| element.text_color(theme.text))
-                    })
-                    .child(label)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.usage_metric != option {
-                            this.usage_metric = option;
-                            cx.notify();
-                        }
-                    })),
-            );
+            let set_metric = move |this: &mut Waku, cx: &mut Context<Waku>| {
+                if this.usage_metric != option {
+                    this.usage_metric = option;
+                    cx.notify();
+                }
+            };
+            let cell = div()
+                .id(SharedString::from(format!("usage-metric-{label}")))
+                .tab_index(0)
+                .focus_visible(|style| style.border_1().border_color(theme.accent))
+                .h(px(22.0))
+                .px(px(9.0))
+                .flex()
+                .items_center()
+                .cursor_default()
+                .text_size(px(9.0))
+                .text_color(if selected {
+                    theme.text
+                } else {
+                    theme.text_secondary
+                })
+                .when(selected, |element| element.bg(theme.overlay))
+                .when(!selected, |element| {
+                    element.hover(|element| element.text_color(theme.text))
+                })
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| set_metric(this, cx)));
+            toggle = toggle
+                .child(crate::ui::accessibility::keyboard_activate(cell, cx, move |this, _, cx| {
+                    set_metric(this, cx)
+                }));
         }
 
         let mut legend = div().flex().items_center().gap(px(14.0));
@@ -719,7 +734,7 @@ impl Waku {
         // One column per day, per provider in ALL order. The chart paths and
         // the hover readout both consume this, so the number under the cursor
         // is by construction the number that was plotted.
-        let series: Vec<[f64; 2]> = days
+        let series: Vec<[f64; USAGE_PROVIDER_COUNT]> = days
             .iter()
             .map(|day| {
                 let slice = history.day(*day);
@@ -734,7 +749,11 @@ impl Waku {
                         })
                         .unwrap_or(0.0)
                 };
-                [value(UsageProvider::Claude), value(UsageProvider::Codex)]
+                let mut bands = [0.0_f64; USAGE_PROVIDER_COUNT];
+                for provider in UsageProvider::ALL {
+                    bands[provider.index()] = value(provider);
+                }
+                bands
             })
             .collect();
         // The scale tops out at the largest single provider-day, not the
@@ -997,34 +1016,37 @@ impl Waku {
             (UsageBreakdown::Day, tr!("usage.day_upper")),
         ] {
             let selected = breakdown == option;
-            toggle = toggle.child(
-                div()
-                    .id(SharedString::from(format!("usage-breakdown-{label}")))
-                    .tab_index(0)
-                    .focus_visible(|style| style.border_1().border_color(theme.accent))
-                    .h(px(22.0))
-                    .px(px(9.0))
-                    .flex()
-                    .items_center()
-                    .cursor_default()
-                    .text_size(px(9.0))
-                    .text_color(if selected {
-                        theme.text
-                    } else {
-                        theme.text_secondary
-                    })
-                    .when(selected, |element| element.bg(theme.overlay))
-                    .when(!selected, |element| {
-                        element.hover(|element| element.text_color(theme.text))
-                    })
-                    .child(label)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.usage_breakdown != option {
-                            this.usage_breakdown = option;
-                            cx.notify();
-                        }
-                    })),
-            );
+            let set_breakdown = move |this: &mut Waku, cx: &mut Context<Waku>| {
+                if this.usage_breakdown != option {
+                    this.usage_breakdown = option;
+                    cx.notify();
+                }
+            };
+            let cell = div()
+                .id(SharedString::from(format!("usage-breakdown-{label}")))
+                .tab_index(0)
+                .focus_visible(|style| style.border_1().border_color(theme.accent))
+                .h(px(22.0))
+                .px(px(9.0))
+                .flex()
+                .items_center()
+                .cursor_default()
+                .text_size(px(9.0))
+                .text_color(if selected {
+                    theme.text
+                } else {
+                    theme.text_secondary
+                })
+                .when(selected, |element| element.bg(theme.overlay))
+                .when(!selected, |element| {
+                    element.hover(|element| element.text_color(theme.text))
+                })
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| set_breakdown(this, cx)));
+            toggle = toggle
+                .child(crate::ui::accessibility::keyboard_activate(cell, cx, move |this, _, cx| {
+                    set_breakdown(this, cx)
+                }));
         }
 
         div()
@@ -2083,10 +2105,13 @@ fn rank_by_cost(history: &UsageHistory) -> bool {
     history.cost_usd > 0.0
 }
 
-fn usage_provider_colors(theme: &Theme) -> [Hsla; 2] {
+fn usage_provider_colors(theme: &Theme) -> [Hsla; USAGE_PROVIDER_COUNT] {
     [
         provider_color(theme, ProviderKind::Claude),
         provider_color(theme, ProviderKind::Codex),
+        provider_color(theme, ProviderKind::OpenCode),
+        provider_color(theme, ProviderKind::Grok),
+        provider_color(theme, ProviderKind::Pi),
     ]
 }
 
@@ -2164,16 +2189,16 @@ fn usage_list_empty_row(theme: &Theme, message: String) -> Div {
 /// one glance carries both size and mix.
 fn usage_split_bar(
     theme: &Theme,
-    colors: [Hsla; 2],
+    colors: [Hsla; USAGE_PROVIDER_COUNT],
     length: f32,
-    by_provider: &[ProviderDay; 2],
+    by_provider: &[ProviderDay; USAGE_PROVIDER_COUNT],
     by_cost: bool,
 ) -> Div {
-    let values = [
-        usage_provider_value(&by_provider[0], by_cost),
-        usage_provider_value(&by_provider[1], by_cost),
-    ];
-    let sum = values[0] + values[1];
+    let values: Vec<f64> = by_provider
+        .iter()
+        .map(|entry| usage_provider_value(entry, by_cost))
+        .collect();
+    let sum: f64 = values.iter().sum();
     let length = if length > 0.0 {
         length.clamp(0.02, 1.0)
     } else {
@@ -2215,7 +2240,11 @@ fn usage_provider_value(entry: &ProviderDay, by_cost: bool) -> f64 {
 
 /// Per-provider amounts with their marks, skipping providers absent from
 /// the row.
-fn usage_provider_values(theme: &Theme, by_provider: &[ProviderDay; 2], by_cost: bool) -> Div {
+fn usage_provider_values(
+    theme: &Theme,
+    by_provider: &[ProviderDay; USAGE_PROVIDER_COUNT],
+    by_cost: bool,
+) -> Div {
     let mut row = div().flex().items_center().gap(px(14.0));
     for provider in UsageProvider::ALL {
         let entry = by_provider[provider.index()];
@@ -2341,21 +2370,22 @@ fn usage_month_strip(
     first_day: NaiveDate,
     peak: f64,
     by_cost: bool,
-    colors: [Hsla; 2],
+    colors: [Hsla; USAGE_PROVIDER_COUNT],
 ) -> impl IntoElement {
     let day_count = usage_history::days_in_month(first_day);
-    let values: Vec<[f64; 2]> = (0..day_count)
+    let values: Vec<[f64; USAGE_PROVIDER_COUNT]> = (0..day_count)
         .map(|offset| {
             let day = first_day + chrono::Days::new(u64::from(offset));
             history
                 .day(day)
                 .map(|slice| {
-                    [
-                        usage_provider_value(&slice.by_provider[0], by_cost),
-                        usage_provider_value(&slice.by_provider[1], by_cost),
-                    ]
+                    let mut bands = [0.0_f64; USAGE_PROVIDER_COUNT];
+                    for (band, entry) in bands.iter_mut().zip(slice.by_provider.iter()) {
+                        *band = usage_provider_value(entry, by_cost);
+                    }
+                    bands
                 })
-                .unwrap_or([0.0, 0.0])
+                .unwrap_or([0.0; USAGE_PROVIDER_COUNT])
         })
         .collect();
     canvas(
@@ -2519,7 +2549,7 @@ fn usage_month_row(
     history: &UsageHistory,
     month: &MonthSlice,
     theme: &Theme,
-    colors: [Hsla; 2],
+    colors: [Hsla; USAGE_PROVIDER_COUNT],
     by_cost: bool,
     peak: f64,
     day_peak: f64,

@@ -688,13 +688,13 @@ impl TerminalView {
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.pause_cursor_blink(cx);
         let keystroke = &event.keystroke;
-        if keystroke.modifiers.platform && keystroke.key.eq_ignore_ascii_case("c") {
+        if keystroke.modifiers.secondary() && keystroke.key.eq_ignore_ascii_case("c") {
             self.copy_selection(cx);
             window.prevent_default();
             cx.stop_propagation();
             return;
         }
-        if keystroke.modifiers.platform && keystroke.key.eq_ignore_ascii_case("a") {
+        if keystroke.modifiers.secondary() && keystroke.key.eq_ignore_ascii_case("a") {
             self.select_all(cx);
             window.prevent_default();
             cx.stop_propagation();
@@ -704,7 +704,7 @@ impl TerminalView {
         let Some(session) = &self.session else {
             return;
         };
-        if keystroke.modifiers.platform && keystroke.key.eq_ignore_ascii_case("v") {
+        if keystroke.modifiers.secondary() && keystroke.key.eq_ignore_ascii_case("v") {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
                 session.term.lock().selection = None;
                 let bytes = bracketed_paste(text, session.mode());
@@ -754,7 +754,7 @@ impl TerminalView {
             return;
         };
 
-        if event.modifiers.platform
+        if event.modifiers.secondary()
             && let Some(link) = self
                 .session
                 .as_mut()
@@ -803,7 +803,7 @@ impl TerminalView {
         let hover_changed = if self.selecting {
             self.set_hovered_link(None)
         } else {
-            self.refresh_hovered_link(event.modifiers.platform, event.position)
+            self.refresh_hovered_link(event.modifiers.secondary(), event.position)
         };
         if !self.selecting || event.pressed_button != Some(MouseButton::Left) {
             if hover_changed {
@@ -844,7 +844,7 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.refresh_hovered_link(event.modifiers.platform, window.mouse_position()) {
+        if self.refresh_hovered_link(event.modifiers.secondary(), window.mouse_position()) {
             cx.notify();
         }
     }
@@ -1449,6 +1449,9 @@ fn terminal_key_bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> 
     let modifiers = keystroke.modifiers;
     let key = keystroke.key.as_str();
 
+    // Word/line cursor jumps on macOS arrive with the Command key; there is no
+    // Ctrl (or other-platform) equivalent in terminals, so this stays on the
+    // raw `platform` modifier rather than the accelerator convention.
     if modifiers.platform {
         return match key {
             "left" => Some(vec![0x01]),

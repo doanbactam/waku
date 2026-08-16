@@ -569,8 +569,7 @@ impl Waku {
                         let _ = click_weak.update(cx, |waku, cx| waku.toggle_include_unstaged(cx));
                     })
                     .on_key_down(move |event: &KeyDownEvent, _, cx| {
-                        if !event.keystroke.modifiers.platform
-                            && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                        if crate::ui::accessibility::is_activation_keystroke(&event.keystroke)
                         {
                             let _ =
                                 key_weak.update(cx, |waku, cx| waku.toggle_include_unstaged(cx));
@@ -820,8 +819,7 @@ fn render_commit_action_row(
                 });
             })
             .on_key_down(move |event: &KeyDownEvent, window, cx| {
-                if !event.keystroke.modifiers.platform
-                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                if crate::ui::accessibility::is_activation_keystroke(&event.keystroke)
                 {
                     let _ = key_weak.update(cx, |waku, cx| {
                         waku.request_commit_action(action, window, cx)

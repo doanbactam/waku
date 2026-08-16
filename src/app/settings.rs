@@ -107,6 +107,8 @@ impl Waku {
             .on_action(cx.listener(Self::toggle_fps_counter_action))
             .on_action(cx.listener(Self::navigate_back_action))
             .on_action(cx.listener(Self::navigate_forward_action))
+            .on_action(cx.listener(Self::focus_next_action))
+            .on_action(cx.listener(Self::focus_prev_action))
             .on_action(cx.listener(Self::focus_composer_action))
             .on_action(cx.listener(Self::cancel_turn_action))
             .capture_any_mouse_down(cx.listener(Self::navigation_mouse_down))
@@ -135,9 +137,11 @@ impl Waku {
                         "settings-tab-{}",
                         label.to_lowercase()
                     )))
+                    .tab_index(0)
                     .h(px(36.0))
                     .px(px(11.0))
                     .rounded(px(8.0))
+                    .relative()
                     .flex()
                     .items_center()
                     .gap(px(10.0))
@@ -149,10 +153,23 @@ impl Waku {
                         theme.text_secondary
                     })
                     .when(selected, |element| {
-                        element.bg(theme.sidebar_item_background)
+                        element
+                            .bg(theme.sidebar_item_background)
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(0.0))
+                                    .top(px(8.0))
+                                    .bottom(px(8.0))
+                                    .w(px(2.5))
+                                    .rounded_full()
+                                    .bg(theme.accent),
+                            )
                     })
-                    .hover(|element| element.bg(theme.sidebar_item_background))
-                    .active(|element| element.bg(theme.sidebar_item_background))
+                    .when(!selected, |element| {
+                        element.hover(|element| element.bg(theme.overlay))
+                    })
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
                     .child(icon(
                         icon_path,
                         15.0,
@@ -165,6 +182,12 @@ impl Waku {
                     .child(label)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.open_settings_page(page, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.open_settings_page(page, cx);
+                            cx.stop_propagation();
+                        }
                     })),
             );
         }
@@ -197,6 +220,7 @@ impl Waku {
                 div().px(px(12.0)).child(
                     div()
                         .id("settings-back")
+                        .tab_index(0)
                         .h(px(34.0))
                         .px(px(9.0))
                         .rounded(px(8.0))
@@ -206,6 +230,7 @@ impl Waku {
                         .cursor_default()
                         .text_size(px(13.0))
                         .text_color(theme.text_secondary)
+                        .focus_visible(|style| style.border_1().border_color(theme.accent))
                         .hover(|element| element.bg(theme.overlay))
                         .active(|element| element.bg(theme.overlay_strong))
                         .child(icon("icons/arrow-left.svg", 15.0, theme.text_tertiary))
@@ -215,6 +240,15 @@ impl Waku {
                             let focus_handle = this.composer_focus(cx);
                             window.focus(&focus_handle, cx);
                             cx.notify();
+                        }))
+                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                this.settings_page = None;
+                                let focus_handle = this.composer_focus(cx);
+                                window.focus(&focus_handle, cx);
+                                cx.notify();
+                                cx.stop_propagation();
+                            }
                         })),
                 ),
             )
@@ -433,8 +467,7 @@ impl Waku {
                 this.set_analytics_enabled(!analytics_enabled, cx);
             }))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                if !event.keystroke.modifiers.platform
-                    && matches!(event.keystroke.key.as_str(), "enter" | "space")
+                if crate::ui::accessibility::is_activation_keystroke(&event.keystroke)
                 {
                     this.set_analytics_enabled(!analytics_enabled, cx);
                     cx.stop_propagation();
@@ -528,6 +561,13 @@ impl Waku {
                     }))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.set_automatic_updates_enabled(!enabled, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if crate::ui::accessibility::is_activation_keystroke(&event.keystroke)
+                        {
+                            this.set_automatic_updates_enabled(!enabled, cx);
+                            cx.stop_propagation();
+                        }
                     }));
                 column.child(
                     div()
@@ -753,6 +793,14 @@ impl Waku {
             .on_click(cx.listener(|this, _, _, cx| {
                 this.refresh_provider_detection(None);
                 cx.notify();
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if crate::ui::accessibility::is_activation_keystroke(&event.keystroke)
+                {
+                    this.refresh_provider_detection(None);
+                    cx.notify();
+                    cx.stop_propagation();
+                }
             }));
 
         let mut rows = div().mt(px(4.0)).flex().flex_col();
@@ -863,6 +911,13 @@ impl Waku {
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.set_provider_enabled(kind, disabled, cx);
+                }))
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                    if crate::ui::accessibility::is_activation_keystroke(&event.keystroke)
+                    {
+                        this.set_provider_enabled(kind, disabled, cx);
+                        cx.stop_propagation();
+                    }
                 }));
 
             let expanded = self.expanded_provider_settings == Some(kind);
@@ -1082,6 +1137,15 @@ impl Waku {
                 this.provider_path_input
                     .update(cx, |input, cx| input.clear(cx));
                 this.apply_provider_path_override(cx);
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if crate::ui::accessibility::is_activation_keystroke(&event.keystroke)
+                {
+                    this.provider_path_input
+                        .update(cx, |input, cx| input.clear(cx));
+                    this.apply_provider_path_override(cx);
+                    cx.stop_propagation();
+                }
             }));
 
         div()
@@ -1258,6 +1322,7 @@ impl Waku {
         } else {
             for (index, grant) in self.state.computer_use_allowed_apps.iter().enumerate() {
                 let key = grant.key();
+                let revoke_key = key.clone();
                 let is_last = index + 1 == self.state.computer_use_allowed_apps.len();
                 let app_icon = self.computer_use_app_icon(&grant.bundle_id, cx);
                 allowed_apps = allowed_apps.child(
@@ -1302,6 +1367,7 @@ impl Waku {
                         .child(
                             div()
                                 .id(SharedString::from(format!("revoke-computer-app-{key}")))
+                                .tab_index(0)
                                 .h(px(25.0))
                                 .px(px(9.0))
                                 .rounded(px(6.0))
@@ -1310,12 +1376,20 @@ impl Waku {
                                 .flex()
                                 .items_center()
                                 .cursor_default()
+                                .focus_visible(|style| style.border_color(theme.accent))
                                 .text_size(px(10.5))
                                 .text_color(theme.text_secondary)
                                 .hover(|element| element.bg(theme.overlay).text_color(theme.danger))
                                 .child(tr!("common.revoke"))
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.revoke_computer_app(&key, cx);
+                                    this.revoke_computer_app(&revoke_key, cx);
+                                }))
+                                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                                    if crate::ui::accessibility::is_activation_keystroke(&event.keystroke)
+                                    {
+                                        this.revoke_computer_app(&key, cx);
+                                        cx.stop_propagation();
+                                    }
                                 })),
                         ),
                 );
@@ -1360,6 +1434,8 @@ impl Waku {
                     .child(
                         div()
                             .id("computer-use-enabled")
+                            .tab_index(0)
+                            .focus_visible(|style| style.border_1().border_color(theme.accent))
                             .w(px(36.0))
                             .h(px(20.0))
                             .p(px(2.0))
@@ -1382,6 +1458,13 @@ impl Waku {
                             }))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.set_computer_use_enabled(!enabled, cx);
+                            }))
+                            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                                if crate::ui::accessibility::is_activation_keystroke(&event.keystroke)
+                                {
+                                    this.set_computer_use_enabled(!enabled, cx);
+                                    cx.stop_propagation();
+                                }
                             })),
                     ),
             )
@@ -1428,6 +1511,7 @@ impl Waku {
                         div().mt(px(11.0)).flex().items_center().gap(px(8.0)).child(
                             div()
                                 .id("recheck-computer-permissions")
+                                .tab_index(0)
                                 .h(px(28.0))
                                 .px(px(11.0))
                                 .rounded(px(7.0))
@@ -1437,6 +1521,7 @@ impl Waku {
                                 .flex()
                                 .items_center()
                                 .cursor_default()
+                                .focus_visible(|style| style.border_color(theme.accent))
                                 .text_size(px(10.5))
                                 .opacity(if pending { 0.6 } else { 1.0 })
                                 .child(if pending {
@@ -1446,6 +1531,13 @@ impl Waku {
                                 })
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.request_computer_permissions(false, cx);
+                                }))
+                                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                                    if crate::ui::accessibility::is_activation_keystroke(&event.keystroke)
+                                    {
+                                        this.request_computer_permissions(false, cx);
+                                        cx.stop_propagation();
+                                    }
                                 })),
                         ),
                     ),
@@ -1702,6 +1794,7 @@ fn permission_status_row(
     } else {
         div()
             .id(id)
+            .tab_index(0)
             .h(px(25.0))
             .px(px(9.0))
             .rounded(px(6.0))
@@ -1710,12 +1803,20 @@ fn permission_status_row(
             .flex()
             .items_center()
             .cursor_default()
+            .focus_visible(|style| style.border_color(theme.accent))
             .text_size(px(10.0))
             .text_color(theme.text_secondary)
             .hover(|element| element.bg(theme.overlay).text_color(theme.text))
             .child(tr!("computer_use.grant_access"))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.request_computer_permissions(true, cx);
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if crate::ui::accessibility::is_activation_keystroke(&event.keystroke)
+                {
+                    this.request_computer_permissions(true, cx);
+                    cx.stop_propagation();
+                }
             }))
     };
 

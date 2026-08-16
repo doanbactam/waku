@@ -7,3 +7,7 @@ target
 /dist
 node_modules
 temp/
+
+# Local agent tooling state (north loop, zcode plans)
+.north/
+.zcode/

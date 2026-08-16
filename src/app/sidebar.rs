@@ -55,6 +55,13 @@ impl SidebarStatusFilter {
     }
 }
 
+/// Which active filter a removable chip in the sidebar stands for.
+#[derive(Clone, Copy)]
+enum SidebarFilterChipKind {
+    Provider,
+    Status,
+}
+
 fn session_group_header(theme: &Theme) -> Div {
     div()
         .h(px(28.0))
@@ -175,8 +182,9 @@ pub(super) fn format_time_ago(seconds: u64) -> String {
 /// One row of the virtualized sidebar session history.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SidebarRow {
-    /// Project header for the project-first task list.
-    ProjectHeader(Uuid),
+    /// Project header for the project-first task list, plus how many matching
+    /// sessions the group shows under the current filters.
+    ProjectHeader(Uuid, usize),
     /// A started session.
     Session(Uuid),
     /// Spacing between project groups.
@@ -444,10 +452,12 @@ impl Waku {
                     .child(self.render_sidebar_project_selector(cx))
                     .child(self.render_sidebar_project_action(cx)),
             )
-            .child(self.render_sidebar_history_header(cx))
             .child(self.render_sidebar_new_session(cx))
             .child(self.render_sidebar_search(cx))
             .child(self.render_sidebar_filters(cx))
+            .when_some(self.render_sidebar_filter_chips(cx), |element, chips| {
+                element.child(chips)
+            })
             .pb(px(8.0))
     }
 
@@ -470,15 +480,14 @@ impl Waku {
             + usize::from(self.sidebar_status_filter != SidebarStatusFilter::All)
     }
 
-    fn sidebar_filter_summary(&self) -> Option<String> {
-        let mut summary = Vec::new();
-        if let Some(provider) = self.sidebar_provider_filter {
-            summary.push(provider.short_name().to_owned());
+    fn clear_sidebar_filter_chip(&mut self, kind: SidebarFilterChipKind, cx: &mut Context<Self>) {
+        match kind {
+            SidebarFilterChipKind::Provider => self.set_sidebar_provider_filter(None, cx),
+            SidebarFilterChipKind::Status => {
+                self.sidebar_status_filter = SidebarStatusFilter::All;
+                cx.notify();
+            }
         }
-        if self.sidebar_status_filter != SidebarStatusFilter::All {
-            summary.push(self.sidebar_status_filter.label());
-        }
-        (!summary.is_empty()).then(|| summary.join(" · "))
     }
 
     fn resolved_sidebar_project_filter(&self) -> Option<SidebarProjectFilter> {
@@ -527,7 +536,11 @@ impl Waku {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(div().size(px(20.0))),
+                    .child(icon(
+                        if scoped { "icons/folder.svg" } else { "icons/globe.svg" },
+                        16.0,
+                        theme.text_secondary,
+                    )),
             )
             .child(
                 div()
@@ -656,15 +669,21 @@ impl Waku {
                     .text_color(theme.text_secondary)
                     .child(tr!("sidebar.filters")),
             )
-            .when_some(self.sidebar_filter_summary(), |element, summary| {
+            .when(active_count > 0, |element| {
                 element.child(
                     div()
-                        .max_w(px(150.0))
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(11.5))
+                        .flex_none()
+                        .w(px(16.0))
+                        .h(px(16.0))
+                        .rounded_full()
+                        .bg(theme.accent.opacity(0.14))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(10.0))
+                        .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.accent)
-                        .child(SharedString::from(summary)),
+                        .child(SharedString::from(active_count.to_string())),
                 )
             })
             .child(icon("icons/chevron-down.svg", 11.0, theme.text_ghost));
@@ -759,26 +778,132 @@ impl Waku {
         div().w_full().child(picker)
     }
 
-    fn render_sidebar_history_header(&self, cx: &mut Context<Self>) -> Div {
+    /// A compact removable pill for one active filter: provider mark + label +
+    /// an X that clears just that filter. Activation follows the shared
+    /// keyboard convention (`keyboard_activate`) so it works identically by
+    /// click and by Enter/Space on every platform.
+    fn sidebar_filter_chip(
+        &self,
+        id: &'static str,
+        kind: SidebarFilterChipKind,
+        icon_path: &'static str,
+        icon_color: Hsla,
+        label: SharedString,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let theme = Theme::current(cx);
+        let remove_id: SharedString = format!("{id}-remove").into();
+        let remove = crate::ui::accessibility::focus_ring(
+            div()
+                .id(remove_id)
+                .size(px(15.0))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_default()
+                .hover(|element| element.bg(theme.overlay_strong))
+                .child(icon("icons/x.svg", 10.0, theme.text_tertiary)),
+            &theme,
+        );
+        let remove = crate::ui::accessibility::keyboard_activate(remove, cx, move |this, _, cx| {
+            this.clear_sidebar_filter_chip(kind, cx);
+        });
         div()
-            .h(px(SIDEBAR_ACTION_ROW_HEIGHT))
-            .w_full()
-            .px(px(8.0))
-            .rounded(px(7.0))
+            .id(id)
+            .h(px(22.0))
+            .pl(px(7.0))
+            .pr(px(4.0))
+            .rounded_full()
+            .bg(theme.overlay)
+            .border_1()
+            .border_color(theme.border)
             .flex()
             .items_center()
-            .gap(px(8.0))
-            .child(icon("icons/folder.svg", 16.0, theme.text_tertiary))
+            .gap(px(4.0))
+            .cursor_default()
+            .child(icon(icon_path, 11.0, icon_color))
             .child(
                 div()
-                    .min_w_0()
-                    .flex_1()
-                    .truncate()
-                    .text_size(px(13.5))
-                    .text_color(theme.text_tertiary)
-                    .child(tr!("sidebar.projects")),
+                    .text_size(px(11.0))
+                    .text_color(theme.text_secondary)
+                    .child(label),
             )
+            .child(remove)
+    }
+
+    /// The removable chips for the active filters, rendered right under the
+    /// Filters row so the current scope is visible at a glance and each one can
+    /// be dropped with one click. Absent when nothing is filtered, so the chrome
+    /// stays a single clean row in the common case.
+    fn render_sidebar_filter_chips(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let provider = self.sidebar_provider_filter;
+        let status = self.sidebar_status_filter;
+        if provider.is_none() && status == SidebarStatusFilter::All {
+            return None;
+        }
+
+        let theme = Theme::current(cx);
+        let mut chips = div().flex().flex_wrap().gap(px(6.0)).pt(px(6.0));
+
+        if let Some(provider) = provider {
+            chips = chips.child(self.sidebar_filter_chip(
+                "sidebar-chip-provider",
+                SidebarFilterChipKind::Provider,
+                provider_icon(provider),
+                provider_color(&theme, provider),
+                provider.display_name().into(),
+                cx,
+            ));
+        }
+        if status != SidebarStatusFilter::All {
+            chips = chips.child(self.sidebar_filter_chip(
+                "sidebar-chip-status",
+                SidebarFilterChipKind::Status,
+                match status {
+                    SidebarStatusFilter::All => "icons/gauge.svg",
+                    SidebarStatusFilter::Active => "icons/loader-circle.svg",
+                    SidebarStatusFilter::NeedsYou => "icons/alert.svg",
+                    SidebarStatusFilter::Done => "icons/check.svg",
+                    SidebarStatusFilter::Failed => "icons/x.svg",
+                },
+                match status {
+                    SidebarStatusFilter::All => theme.text_tertiary,
+                    SidebarStatusFilter::Active => theme.accent,
+                    SidebarStatusFilter::NeedsYou => theme.warning,
+                    SidebarStatusFilter::Done => theme.success,
+                    SidebarStatusFilter::Failed => theme.danger,
+                },
+                status.label().into(),
+                cx,
+            ));
+        }
+
+        chips = chips.child(
+            crate::ui::accessibility::keyboard_activate(
+                crate::ui::accessibility::focus_ring(
+                    div()
+                        .id("sidebar-clear-filters")
+                        .h(px(22.0))
+                        .px(px(7.0))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .cursor_default()
+                        .text_size(px(11.0))
+                        .text_color(theme.text_tertiary)
+                        .hover(|element| {
+                            element.bg(theme.overlay).text_color(theme.text_secondary)
+                        })
+                        .child(tr!("sidebar.clear_filters")),
+                    &theme,
+                ),
+                cx,
+                move |this, _, cx| this.clear_sidebar_filters(cx),
+            ),
+        );
+
+        Some(chips)
     }
 
     fn set_sidebar_provider_filter(
@@ -811,40 +936,58 @@ impl Waku {
         cx.notify();
     }
 
+    /// The sidebar's primary action. Sits directly under the project scope
+    /// selector and is the only filled control in the chrome, so "start
+    /// something new" reads at a glance before the quieter search/filter rows.
     fn render_sidebar_new_session(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        self.render_sidebar_action_row(
-            "sidebar-new-session",
-            "icons/compose.svg",
-            tr!("menu.new_task"),
-            cx,
-        )
-        .on_click(cx.listener(|this, _, window, cx| {
+        let theme = Theme::current(cx);
+        let element = crate::ui::accessibility::focus_ring(
+            div()
+                .id("sidebar-new-session")
+                .w_full()
+                .h(px(32.0))
+                .mt(px(4.0))
+                .mb(px(2.0))
+                .px(px(9.0))
+                .rounded(px(8.0))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .cursor_default()
+                .bg(theme.inverse)
+                .text_color(theme.on_inverse)
+                .text_size(px(12.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .hover(|element| element.opacity(0.92))
+                .active(|element| element.opacity(0.8))
+                .child(icon("icons/compose.svg", 14.0, theme.on_inverse))
+                .child(tr!("menu.new_task"))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.new_session_action(&NewSession, window, cx);
+                })),
+            &theme,
+        );
+        crate::ui::accessibility::keyboard_activate(element, cx, |this, window, cx| {
             this.new_session_action(&NewSession, window, cx);
-        }))
-        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                this.new_session_action(&NewSession, window, cx);
-                cx.stop_propagation();
-            }
-        }))
+        })
     }
 
     fn render_sidebar_search(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        self.render_sidebar_action_row(
-            "sidebar-search",
-            "icons/search.svg",
-            tr!("sidebar.search"),
-            cx,
-        )
-        .on_click(cx.listener(|this, _, window, cx| {
-            this.toggle_command_palette_action(&ToggleCommandPalette, window, cx);
-        }))
-        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+        crate::ui::accessibility::keyboard_activate(
+            self.render_sidebar_action_row(
+                "sidebar-search",
+                "icons/search.svg",
+                tr!("sidebar.search"),
+                cx,
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
                 this.toggle_command_palette_action(&ToggleCommandPalette, window, cx);
-                cx.stop_propagation();
-            }
-        }))
+            })),
+            cx,
+            |this, window, cx| {
+                this.toggle_command_palette_action(&ToggleCommandPalette, window, cx);
+            },
+        )
     }
 
     fn start_available_update(&mut self, cx: &mut Context<Self>) {
@@ -1127,7 +1270,7 @@ impl Waku {
         }
         let mut rows = Vec::new();
         for (project_id, sessions) in groups {
-            rows.push(SidebarRow::ProjectHeader(project_id));
+            rows.push(SidebarRow::ProjectHeader(project_id, sessions.len()));
             rows.extend(sessions.into_iter().map(SidebarRow::Session));
             rows.push(SidebarRow::GroupSpacer);
         }
@@ -1221,8 +1364,8 @@ impl Waku {
             return div().into_any_element();
         };
         match *row {
-            SidebarRow::ProjectHeader(project_id) => self
-                .render_sidebar_project_header(project_id, cx)
+            SidebarRow::ProjectHeader(project_id, task_count) => self
+                .render_sidebar_project_header(project_id, task_count, cx)
                 .into_any_element(),
             SidebarRow::Session(session_id) => self
                 .render_sidebar_session_item(session_id, cx)
@@ -1232,7 +1375,12 @@ impl Waku {
         }
     }
 
-    fn render_sidebar_project_header(&self, project_id: Uuid, cx: &mut Context<Self>) -> Div {
+    fn render_sidebar_project_header(
+        &self,
+        project_id: Uuid,
+        task_count: usize,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let theme = Theme::current(cx);
         let project_name = self
             .state
@@ -1241,19 +1389,32 @@ impl Waku {
             .find(|project| project.id == project_id)
             .map(Project::display_name)
             .unwrap_or_else(|| tr!("sidebar.unknown_project"));
+        let count_label = if task_count == 1 {
+            tr!("sidebar.task_count_one", count = task_count)
+        } else {
+            tr!("sidebar.task_count_many", count = task_count)
+        };
         session_group_header(&theme).w_full().child(
             div()
                 .flex()
                 .items_center()
                 .gap(px(6.0))
                 .min_w_0()
+                .flex_1()
                 .child(icon("icons/folder.svg", 12.0, theme.text_tertiary))
                 .child(
                     div()
                         .min_w_0()
+                        .flex_1()
                         .truncate()
                         .text_color(theme.text_tertiary)
                         .child(project_name),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(theme.text_ghost)
+                        .child(SharedString::from(count_label)),
                 ),
         )
     }
@@ -1383,6 +1544,9 @@ impl Waku {
                 .text_overflow(gpui::TextOverflow::Truncate("...".into()))
                 .text_size(px(13.5))
                 .text_color(theme.text)
+                .when(selected, |element| {
+                    element.font_weight(FontWeight::MEDIUM)
+                })
                 .child(SharedString::from(localized_session_title(session)))
                 .into_any_element()
         };
@@ -1394,18 +1558,31 @@ impl Waku {
             .id(SharedString::from(format!("session-{}", session.id)))
             .w_full()
             .min_w_0()
+            .relative()
             .flex()
             .flex_col()
             .gap(px(4.0))
-            .px(px(8.0))
+            .px(px(11.0))
             .py(px(7.0))
             .rounded(px(7.0))
             .cursor_default()
             .when(selected, |element| {
-                element.bg(theme.sidebar_item_background)
+                element
+                    .bg(theme.overlay_strong)
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(0.0))
+                            .top(px(9.0))
+                            .bottom(px(9.0))
+                            .w(px(3.0))
+                            .rounded_full()
+                            .bg(theme.accent),
+                    )
             })
-            .hover(|element| element.bg(theme.sidebar_item_background))
-            .active(|element| element.bg(theme.sidebar_item_background))
+            .when(!selected, |element| {
+                element.hover(|element| element.bg(theme.overlay))
+            })
             .child(
                 div()
                     .flex()
@@ -1478,6 +1655,9 @@ impl Waku {
                             .flex_none()
                             .text_color(theme.text_tertiary)
                             .child(session.provider.short_name()),
+                    )
+                    .child(
+                        div().flex_1().min_w(px(0.0)),
                     )
                     .when_some(time_label, |element, label| {
                         element.child(

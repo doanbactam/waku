@@ -62,7 +62,7 @@ Waku's native surfaces have different maturity per platform:
 | Surface | macOS | Linux | Windows |
 | --- | :---: | :---: | :---: |
 | App shell (window, sidebar, transcript, composer) | ✅ | ✅ builds, runs | ✅ builds |
-| Browser surface (right panel) | ✅ | gated off (1) | ✅ builds (WebView2) |
+| Browser surface (right panel) | ✅ | ✅ X11 / gated on Wayland (1) | ✅ builds (WebView2) |
 | Computer Use (resources, REPL, skills) | ✅ | ✅ builds | ✅ builds |
 | Computer Use (native accessibility backend) | ✅ | not yet (AT-SPI) | not yet (UI Automation) |
 | In-app updater (Sparkle) | ✅ | not yet | not yet (WinSparkle planned) |
@@ -73,9 +73,10 @@ cross-checked from Linux with `mingw-w64` (`x86_64-pc-windows-gnu`). Runtime
 validation on Linux and Windows requires a real desktop (the development orb
 is headless).
 
-1. Linux browser is gated off because GPUI exposes Xcb/Wayland window handles
-   and wry's child-webview path needs Xlib or a GTK container. See
-   [docs/cross-platform.md](docs/cross-platform.md) for details.
+1. Linux X11 uses a native WebKitGTK child webview through an XCB→Xlib window
+   adapter. Wayland remains gated until GPUI exposes a GTK container or
+   foreign-subsurface host. See [docs/cross-platform.md](docs/cross-platform.md)
+   for the required native packages and details.
 
 ## Sponsorship
 

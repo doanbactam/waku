@@ -351,13 +351,84 @@ mod host {
     }
 }
 
-/// Linux and other non-mac/non-Windows platforms have no wry
-/// child-webview path today: GPUI exposes Xcb/Wayland window handles, and
-/// wry's `build_as_child` needs an Xlib handle (or a GTK container via
-/// `build_gtk`, which GPUI does not host). The browser surface stays gated
-/// off until either wry accepts Xcb/Wayland or GPUI exposes a GTK container.
-/// See docs/cross-platform.md.
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+/// Linux uses WebKitGTK through wry's X11 child path. GPUI exposes an Xcb
+/// window handle while wry currently requires Xlib, so the host adapts the
+/// stable X11 window id without touching the render loop. Wayland remains
+/// gated until GPUI exposes a GTK container/subsurface host.
+#[cfg(target_os = "linux")]
+mod host {
+    use gpui::{Bounds, Pixels};
+    use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, WindowHandle};
+    use std::ffi::c_ulong;
+    use wry::dpi::{LogicalPosition, LogicalSize};
+
+    pub(super) struct XlibParent {
+        window: c_ulong,
+    }
+
+    impl HasWindowHandle for XlibParent {
+        fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+            let handle = raw_window_handle::XlibWindowHandle::new(self.window);
+            Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Xlib(handle)) })
+        }
+    }
+
+    pub(super) struct WebviewHost {
+        pub webview: wry::WebView,
+        last_bounds: std::cell::Cell<Option<(i32, i32, i32, i32)>>,
+        visible: std::cell::Cell<bool>,
+    }
+
+    impl WebviewHost {
+        pub fn new(webview: wry::WebView) -> Self {
+            Self {
+                webview,
+                last_bounds: std::cell::Cell::new(None),
+                visible: std::cell::Cell::new(false),
+            }
+        }
+
+        pub fn sync_bounds(&self, bounds: Bounds<Pixels>) {
+            let left = f32::from(bounds.origin.x).round() as i32;
+            let top = f32::from(bounds.origin.y).round() as i32;
+            let right = f32::from(bounds.origin.x + bounds.size.width).round() as i32;
+            let bottom = f32::from(bounds.origin.y + bounds.size.height).round() as i32;
+            if self.last_bounds.get() == Some((left, top, right, bottom)) {
+                return;
+            }
+            self.last_bounds.set(Some((left, top, right, bottom)));
+            let _ = self.webview.set_bounds(wry::Rect {
+                position: LogicalPosition::new(f64::from(left), f64::from(top)).into(),
+                size: LogicalSize::new(f64::from(right - left), f64::from(bottom - top)).into(),
+            });
+        }
+
+        pub fn set_visible(&self, visible: bool) {
+            if self.visible.get() == visible {
+                return;
+            }
+            self.visible.set(visible);
+            let _ = self.webview.set_visible(visible);
+        }
+
+        pub fn native_focus_within(&self) -> bool {
+            false
+        }
+
+        pub(super) fn parent(window: &gpui::Window) -> Result<XlibParent, String> {
+            let handle = HasWindowHandle::window_handle(window)
+                .map_err(|error| format!("could not get Linux window handle: {error}"))?;
+            let raw = handle.as_raw();
+            let RawWindowHandle::Xcb(xcb) = raw else {
+                return Err("Linux browser requires an X11 GPUI window".into());
+            };
+            let window = xcb.window.get() as c_ulong;
+            Ok(XlibParent { window })
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 mod host {
     use gpui::{Bounds, Pixels};
 
@@ -726,9 +797,71 @@ impl BrowserView {
         cx.notify();
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     fn build_webview(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
         self.host_error = Some(tr!("browser.unsupported_platform"));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn build_webview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use wry::dpi::{LogicalPosition, LogicalSize};
+
+        let deferred = Deferred {
+            executor: cx.foreground_executor().clone(),
+            cx: cx.to_async(),
+            view: cx.entity().downgrade(),
+        };
+        let on_page_load = deferred.clone();
+        let on_title = deferred.clone();
+        let on_new_window = deferred.clone();
+
+        let parent = match host::WebviewHost::parent(window) {
+            Ok(parent) => parent,
+            Err(error) => {
+                self.host_error = Some(error);
+                return;
+            }
+        };
+        let built = wry::WebViewBuilder::new()
+            .with_bounds(wry::Rect {
+                position: LogicalPosition::new(0.0, 0.0).into(),
+                size: LogicalSize::new(0.0, 0.0).into(),
+            })
+            .with_visible(false)
+            .with_devtools(true)
+            .with_navigation_handler(|_| true)
+            .with_on_page_load_handler(move |event, url| {
+                let event = match event {
+                    wry::PageLoadEvent::Started => PageLoad::Started,
+                    wry::PageLoadEvent::Finished => PageLoad::Finished,
+                };
+                on_page_load.update(move |this, cx| this.page_load_changed(event, url, cx));
+            })
+            .with_document_title_changed_handler(move |title| {
+                on_title.update(move |this, cx| this.title_changed(title, cx));
+            })
+            .with_new_window_req_handler(move |url, _features| {
+                on_new_window.update(move |this, cx| this.navigate_to_url(url, cx));
+                wry::NewWindowResponse::Deny
+            })
+            .with_download_started_handler(|url, destination| {
+                let Some(target) = download_destination(&url, destination.clone()) else {
+                    return false;
+                };
+                *destination = target;
+                true
+            })
+            .with_download_completed_handler(|_url, path, success| {
+                if success && let Some(path) = path {
+                    reveal_in_finder(&path);
+                }
+            })
+            .build_as_child(&parent);
+
+        match built {
+            Ok(webview) => self.host = Some(Rc::new(WebviewHost::new(webview))),
+            Err(error) => self.host_error = Some(error.to_string()),
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -817,7 +950,7 @@ impl BrowserView {
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fn refresh_navigation_state(&mut self) {
         if let Some(host) = &self.host {
             self.can_go_back = host.webview.can_go_back().unwrap_or(false);
@@ -825,7 +958,7 @@ impl BrowserView {
         }
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     fn refresh_navigation_state(&mut self) {}
 
     /// Push the committed page URL into the address field unless the user is
@@ -861,7 +994,7 @@ impl BrowserView {
         let Some(host) = &self.host else {
             return;
         };
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         if host.webview.load_url(&url).is_err() {
             return;
         }
@@ -878,7 +1011,7 @@ impl BrowserView {
     /// callbacks synchronously and this is reached from inside an entity
     /// update, so the native call takes the next executor turn.
     fn focus_page(&mut self, cx: &mut Context<Self>) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         if let Some(host) = self.host.clone() {
             cx.foreground_executor()
                 .spawn(async move {
@@ -1047,7 +1180,7 @@ impl BrowserView {
     /// Return the native first responder to GPUI's view — deferred, since
     /// `makeFirstResponder` runs responder callbacks that may re-enter GPUI.
     fn reclaim_native_keyboard(&mut self, cx: &mut Context<Self>) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         if let Some(host) = self.host.clone() {
             cx.foreground_executor()
                 .spawn(async move {
@@ -1071,7 +1204,7 @@ impl BrowserView {
     }
 
     fn go_back(&mut self, cx: &mut Context<Self>) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         if let Some(host) = &self.host {
             let _ = host.webview.go_back();
             self.refresh_navigation_state();
@@ -1080,7 +1213,7 @@ impl BrowserView {
     }
 
     fn go_forward(&mut self, cx: &mut Context<Self>) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         if let Some(host) = &self.host {
             let _ = host.webview.go_forward();
             self.refresh_navigation_state();
@@ -1089,7 +1222,7 @@ impl BrowserView {
     }
 
     fn reload(&mut self, cx: &mut Context<Self>) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         if let Some(host) = &self.host
             && self.navigation_requested
         {
@@ -1103,7 +1236,7 @@ impl BrowserView {
     /// Windows WebView2 has no equivalent one-shot cache-bypassing reload in
     /// wry's portable API, so it falls back to a plain reload.
     fn hard_reload(&mut self, cx: &mut Context<Self>) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         if let Some(host) = &self.host
             && self.navigation_requested
         {
@@ -1111,7 +1244,7 @@ impl BrowserView {
             {
                 unsafe { host.wk().reloadFromOrigin() };
             }
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             let _ = host.webview.reload();
             self.loading = true;
             cx.notify();
@@ -1134,10 +1267,17 @@ impl BrowserView {
             self.loading = false;
             cx.notify();
         }
+        #[cfg(target_os = "linux")]
+        if let Some(_host) = &self.host {
+            // WebKitGTK's stop operation is not exposed by wry's portable
+            // API; clear the UI state rather than claiming a native stop.
+            self.loading = false;
+            cx.notify();
+        }
     }
 
     fn toggle_devtools(&mut self) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         if let Some(host) = &self.host {
             if host.webview.is_devtools_open() {
                 host.webview.close_devtools();

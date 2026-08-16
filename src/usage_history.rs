@@ -84,20 +84,39 @@ const RATES_CACHE_FILE: &str = "usage-model-rates.json";
 /// Rates move rarely; a day-old table keeps the page working offline.
 const RATES_TTL: Duration = Duration::from_secs(24 * 3600);
 
-/// Providers with a transcript scanner. Mirrors T3 Code's coverage.
+/// Providers with a transcript scanner. Mirrors T3 Code's coverage plus the
+/// local CLIs Waku drives directly. Amp is absent on purpose: its threads
+/// live in Sourcegraph's cloud and the local install keeps no usage store,
+/// so there is nothing on disk to scan.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum UsageProvider {
     Claude,
     Codex,
+    OpenCode,
+    Grok,
+    Pi,
 }
 
+/// How many providers the usage pipeline tracks. Keep in sync with
+/// [`UsageProvider::ALL`] and the fixed `by_provider` arrays.
+pub const USAGE_PROVIDER_COUNT: usize = 5;
+
 impl UsageProvider {
-    pub const ALL: [UsageProvider; 2] = [UsageProvider::Claude, UsageProvider::Codex];
+    pub const ALL: [UsageProvider; USAGE_PROVIDER_COUNT] = [
+        UsageProvider::Claude,
+        UsageProvider::Codex,
+        UsageProvider::OpenCode,
+        UsageProvider::Grok,
+        UsageProvider::Pi,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             UsageProvider::Claude => "Claude Code",
             UsageProvider::Codex => "Codex",
+            UsageProvider::OpenCode => "OpenCode",
+            UsageProvider::Grok => "Grok CLI",
+            UsageProvider::Pi => "Pi",
         }
     }
 
@@ -106,6 +125,9 @@ impl UsageProvider {
         match self {
             UsageProvider::Claude => 0,
             UsageProvider::Codex => 1,
+            UsageProvider::OpenCode => 2,
+            UsageProvider::Grok => 3,
+            UsageProvider::Pi => 4,
         }
     }
 }
@@ -160,6 +182,11 @@ fn might_carry_usage(line: &str, provider: UsageProvider) -> bool {
     match provider {
         UsageProvider::Claude => line.contains("\"usage\""),
         UsageProvider::Codex => line.contains("\"token_count\""),
+        UsageProvider::Grok => line.contains("\"turn_completed\""),
+        // OpenCode transcripts are read from its SQLite store, not jsonl; the
+        // gate never runs for them.
+        UsageProvider::OpenCode => line.contains("\"tokens\""),
+        UsageProvider::Pi => line.contains("\"usage\"") || line.contains("\"session\""),
     }
 }
 
@@ -237,6 +264,231 @@ fn parse_claude_line(line: &str) -> Option<UsageRecord> {
             .and_then(Value::as_f64)
             .filter(|cost| cost.is_finite()),
         dedupe_key,
+    })
+}
+
+/// Parses one row of OpenCode's `message` table (`data` column JSON).
+///
+/// OpenCode writes one row per assistant message with cumulative-per-message
+/// `tokens` and a `cost` in USD. Rows are unique by message id, so every row
+/// is counted and the session id is the row's `session_id`. The working
+/// directory comes from the sibling `session`-table lookup done by the caller.
+fn parse_opencode_message(data: &str, session_id: &str, project: &str) -> Option<UsageRecord> {
+    let record: Value = serde_json::from_str(data).ok()?;
+    if record.get("role").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    let tokens = record.get("tokens")?.as_object()?;
+    // Skip rows with no token information at all: OpenCode also stores tool
+    // outputs and aborted turns as messages.
+    let total = int(tokens.get("total"));
+    if total == 0 {
+        return None;
+    }
+    let model = record.get("modelID").and_then(Value::as_str)?;
+    if model.is_empty() {
+        return None;
+    }
+    // `time.created` is epoch milliseconds.
+    let timestamp_ms = record
+        .pointer("/time/created")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+
+    let cache = tokens.get("cache").unwrap_or(&Value::Null);
+    let input = int(tokens.get("input"));
+    let cache_read = int(cache.get("read"));
+    let cache_write = int(cache.get("write"));
+
+    Some(UsageRecord {
+        provider: UsageProvider::OpenCode,
+        timestamp_ms,
+        model: model.to_owned(),
+        session_id: session_id.to_owned(),
+        project: project.to_owned(),
+        // OpenCode's `input` excludes cached tokens and its `total` includes
+        // them; the pipeline's convention is uncached input + cached counts
+        // kept separate, which matches how `total` reconciles.
+        totals: TokenTotals {
+            uncached_input: input,
+            cached_input: cache_read,
+            cache_creation: cache_write,
+            output: int(tokens.get("output")),
+            reasoning: int(tokens.get("reasoning")),
+        },
+        reported_cost_usd: record
+            .get("cost")
+            .and_then(Value::as_f64)
+            .filter(|cost| cost.is_finite() && *cost > 0.0),
+        dedupe_key: None,
+    })
+}
+
+/// Parses one line of a Grok CLI session's `updates.jsonl`.
+///
+/// Each `turn_completed` update carries the turn's usage, both as an
+/// aggregate and per model under `modelUsage`. The per-model entries are
+/// canonical (they sum to the aggregate when one model served the turn), so
+/// each is emitted as its own record with a prompt-scoped dedupe key.
+fn parse_grok_update(line: &str, session_id: &str, project: &str) -> Vec<UsageRecord> {
+    let Ok(record) = serde_json::from_str::<Value>(line) else {
+        return Vec::new();
+    };
+    let Some(update) = record
+        .pointer("/params/update")
+        .and_then(Value::as_object)
+    else {
+        return Vec::new();
+    };
+    if update.get("sessionUpdate").and_then(Value::as_str) != Some("turn_completed") {
+        return Vec::new();
+    }
+    let Some(usage) = update.get("usage").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    // Seconds, per the CLI's `timestamp` field.
+    let timestamp_ms = record
+        .get("timestamp")
+        .and_then(Value::as_i64)
+        .unwrap_or_default()
+        .saturating_mul(1000);
+    let prompt_id = update
+        .get("prompt_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    let mut records = Vec::new();
+    let model_usage = usage.get("modelUsage").and_then(Value::as_object);
+    match model_usage {
+        Some(models) if !models.is_empty() => {
+            for (model, model_usage) in models {
+                let Some(model_usage) = model_usage.as_object() else {
+                    continue;
+                };
+                records.push(grok_usage_record(
+                    model_usage,
+                    model,
+                    timestamp_ms,
+                    session_id,
+                    project,
+                    Some(&format!("grok:{session_id}:{prompt_id}:{model}")),
+                ));
+            }
+        }
+        // Older builds only wrote the aggregate; fall back to the session's
+        // current model when the update does not name one.
+        _ => {
+            let model = session_grok_model_hint();
+            records.push(grok_usage_record(
+                usage,
+                &model,
+                timestamp_ms,
+                session_id,
+                project,
+                Some(&format!("grok:{session_id}:{prompt_id}")),
+            ));
+        }
+    }
+    records
+}
+
+/// The model name used when a Grok update omits per-model usage. The
+/// aggregate is still worth counting; attributing it to the session's
+/// summary model would need the sibling `summary.json`, which the line
+/// scanner does not read, so a stable generic name keeps pricing possible.
+fn session_grok_model_hint() -> String {
+    "grok".to_owned()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn grok_usage_record(
+    usage: &serde_json::Map<String, Value>,
+    model: &str,
+    timestamp_ms: i64,
+    session_id: &str,
+    project: &str,
+    dedupe_key: Option<&str>,
+) -> UsageRecord {
+    UsageRecord {
+        provider: UsageProvider::Grok,
+        timestamp_ms,
+        model: model.to_owned(),
+        session_id: session_id.to_owned(),
+        project: project.to_owned(),
+        totals: TokenTotals {
+            // Grok's inputTokens already includes cachedReadTokens; split it
+            // the way the pipeline expects so `total` reconciles.
+            uncached_input: int(usage.get("inputTokens")).saturating_sub(int(usage.get("cachedReadTokens"))),
+            cached_input: int(usage.get("cachedReadTokens")),
+            cache_creation: 0,
+            output: int(usage.get("outputTokens")),
+            reasoning: int(usage.get("reasoningTokens")),
+        },
+        reported_cost_usd: None,
+        dedupe_key: dedupe_key.map(str::to_owned),
+    }
+}
+
+/// Rolling state for one Pi session file: the `session` line carries the id
+/// and working directory, and each assistant message carries its own model.
+struct PiScanState {
+    session_id: String,
+    cwd: String,
+}
+
+/// Parses one line of a Pi agent session transcript. Each assistant
+/// `message` event carries per-message `usage` with `cost` in USD; messages
+/// whose usage is all zero (errors, aborted turns) are skipped.
+fn parse_pi_line(line: &str, state: &PiScanState) -> Option<UsageRecord> {
+    let record: Value = serde_json::from_str(line).ok()?;
+    match record.get("type").and_then(Value::as_str) {
+        // The caller's state machine consumes the header line.
+        Some("session") => return None,
+        Some("message") => {}
+        _ => return None,
+    }
+    let message = record.get("message")?.as_object()?;
+    if message.get("role").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    let usage = message.get("usage")?.as_object()?;
+    let timestamp_ms = parse_timestamp_ms(record.get("timestamp"))?;
+    let model = message.get("model").and_then(Value::as_str)?;
+    if model.is_empty() {
+        return None;
+    }
+    // An all-zero usage is an aborted or errored turn, not free work.
+    let input = int(usage.get("input"));
+    let cache_read = int(usage.get("cacheRead"));
+    let cache_write = int(usage.get("cacheWrite"));
+    let output = int(usage.get("output"));
+    if input + cache_read + cache_write + output == 0 {
+        return None;
+    }
+    let reported_cost_usd = usage
+        .get("cost")
+        .and_then(|cost| cost.get("total"))
+        .and_then(Value::as_f64)
+        .filter(|cost| cost.is_finite() && *cost > 0.0);
+
+    Some(UsageRecord {
+        provider: UsageProvider::Pi,
+        timestamp_ms,
+        model: model.to_owned(),
+        session_id: state.session_id.clone(),
+        project: state.cwd.clone(),
+        totals: TokenTotals {
+            uncached_input: input,
+            cached_input: cache_read,
+            cache_creation: cache_write,
+            output,
+            reasoning: int(usage.get("reasoning")),
+        },
+        reported_cost_usd,
+        dedupe_key: record
+            .get("id")
+            .and_then(Value::as_str)
+            .map(|id| format!("pi:{}:{id}", state.session_id)),
     })
 }
 
@@ -576,6 +828,11 @@ fn provider_root(provider: UsageProvider) -> Option<PathBuf> {
             Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir).join("sessions")),
             _ => dirs::home_dir().map(|home| home.join(".codex/sessions")),
         },
+        // OpenCode keeps everything in one SQLite database rather than
+        // per-session jsonl transcripts.
+        UsageProvider::OpenCode => dirs::data_dir().map(|data| data.join("opencode")),
+        UsageProvider::Grok => dirs::home_dir().map(|home| home.join(".grok/sessions")),
+        UsageProvider::Pi => dirs::home_dir().map(|home| home.join(".pi/agent/sessions")),
     }
 }
 
@@ -622,6 +879,100 @@ fn list_transcript_files(
     skipped
 }
 
+/// Recovers `(session_id, cwd)` from a Grok session file's path:
+/// `~/.grok/sessions/<percent-encoded-cwd>/<session-id>/updates.jsonl`.
+/// The directory name is the cwd with `/` encoded as `%2F`; only the path
+/// separators are decoded, which is all the project grouping needs.
+fn grok_session_identity(path: &Path) -> (String, String) {
+    let session_id = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_owned();
+    let encoded_cwd = path
+        .ancestors()
+        .nth(2)
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let cwd = percent_decode_path(encoded_cwd);
+    (session_id, cwd)
+}
+
+/// Decodes `%2F`-style escapes in a Grok session directory name. Returns the
+/// input unchanged on any malformed escape rather than failing the session.
+fn percent_decode_path(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() + 1 && index + 2 < bytes.len() + 1 {
+            let hex = &input[index + 1..(index + 3).min(input.len())];
+            if hex.len() == 2
+                && let Ok(byte) = u8::from_str_radix(hex, 16)
+            {
+                out.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Reads OpenCode's SQLite message store into usage records. The database is
+/// opened read-only; a missing or locked database is no usage, not an error.
+/// `session_id → cwd` comes from the sibling `session` table so records land
+/// in the right project row.
+fn read_opencode_records(root: &Path, since_ms: i64) -> Option<Vec<UsageRecord>> {
+    let db_path = root.join("opencode.db");
+    let connection = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .ok()?;
+    let mut cwd_by_session: HashMap<String, String> = HashMap::new();
+    {
+        let mut statement = connection
+            .prepare("SELECT id, directory FROM session")
+            .ok()?;
+        let mut rows = statement.query([]).ok()?;
+        while let Ok(Some(row)) = rows.next() {
+            let id: String = row.get(0).unwrap_or_default();
+            let directory: Option<String> = row.get(1).ok().flatten();
+            if let Some(directory) = directory {
+                cwd_by_session.insert(id, directory);
+            }
+        }
+    }
+    let mut statement = connection
+        .prepare("SELECT session_id, time_created, data FROM message")
+        .ok()?;
+    let mut rows = statement.query([]).ok()?;
+    let mut records = Vec::new();
+    while let Ok(Some(row)) = rows.next() {
+        let session_id: String = row.get(0).unwrap_or_default();
+        let time_created: i64 = row.get(1).unwrap_or(0);
+        // `time_created` is epoch milliseconds; skip rows outside the window
+        // before parsing their JSON.
+        if time_created < since_ms {
+            continue;
+        }
+        let data: String = row.get(2).unwrap_or_default();
+        let project = cwd_by_session
+            .get(&session_id)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(record) = parse_opencode_message(&data, &session_id, &project) {
+            records.push(record);
+        }
+    }
+    Some(records)
+}
+
 /// Streams one transcript and returns the usage records it contains, already
 /// de-duplicated within the file, or `None` when it could not be read. The
 /// distinction matters to the cache: an empty transcript is a stable fact
@@ -633,6 +984,29 @@ fn read_transcript_records(path: &Path, provider: UsageProvider) -> Option<Vec<U
     let mut line = String::new();
     let mut records = Vec::new();
     let mut codex_state = CodexScanState::new();
+    // A Grok session directory is `<encoded-cwd>/<session-id>/updates.jsonl`;
+    // the ancestors carry both identity pieces.
+    let grok_identity = (provider == UsageProvider::Grok)
+        .then(|| grok_session_identity(path))
+        .unwrap_or_default();
+    // Pi's `session` header line carries the id and cwd the message events
+    // do not repeat.
+    let mut pi_state = PiScanState {
+        session_id: path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(|stem| {
+                // File names are `<timestamp>_<uuid>.jsonl`; the uuid is the id.
+                stem.rsplit('_').take(2).collect::<Vec<_>>()
+                    .iter()
+                    .rev()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("_")
+            })
+            .unwrap_or_default(),
+        cwd: String::new(),
+    };
     let mut seen_in_file = HashSet::new();
 
     loop {
@@ -674,6 +1048,48 @@ fn read_transcript_records(path: &Path, provider: UsageProvider) -> Option<Vec<U
                     records.push(record);
                 }
             }
+            UsageProvider::Grok => {
+                if !might_carry_usage(&line, provider) {
+                    continue;
+                }
+                records.extend(parse_grok_update(
+                    &line,
+                    &grok_identity.0,
+                    &grok_identity.1,
+                ));
+            }
+            UsageProvider::Pi => {
+                if !might_carry_usage(&line, provider) {
+                    continue;
+                }
+                // The `session` header line seeds the state the message
+                // events read; usage lines then parse against it.
+                if line.contains("\"type\":\"session\"") {
+                    if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                        if let Some(id) = value.get("id").and_then(Value::as_str) {
+                            pi_state.session_id = id.to_owned();
+                        }
+                        if let Some(cwd) = value.get("cwd").and_then(Value::as_str) {
+                            pi_state.cwd = cwd.to_owned();
+                        }
+                    }
+                    continue;
+                }
+                let Some(record) = parse_pi_line(&line, &pi_state) else {
+                    continue;
+                };
+                // Same message id across files (resumed sessions) dedupes
+                // globally in the aggregator; within the file the first wins.
+                if let Some(key) = &record.dedupe_key
+                    && !seen_in_file.insert(key.clone())
+                {
+                    continue;
+                }
+                records.push(record);
+            }
+            // OpenCode reaches the pipeline through its SQLite store, not
+            // per-file jsonl transcripts.
+            UsageProvider::OpenCode => {}
         }
     }
     Some(records)
@@ -705,7 +1121,7 @@ struct Bucket {
 struct ProjectAccumulator {
     cost_usd: f64,
     total_tokens: u64,
-    by_provider: [ProviderDay; 2],
+    by_provider: [ProviderDay; USAGE_PROVIDER_COUNT],
     sessions: HashSet<(UsageProvider, String)>,
     /// Cost per model, for the row's "top models" caption.
     models: HashMap<String, f64>,
@@ -871,7 +1287,7 @@ pub struct DaySlice {
     pub day: NaiveDate,
     pub cost_usd: f64,
     pub total_tokens: u64,
-    pub by_provider: [ProviderDay; 2],
+    pub by_provider: [ProviderDay; USAGE_PROVIDER_COUNT],
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -889,7 +1305,7 @@ pub struct MonthSlice {
     pub first_day: NaiveDate,
     pub cost_usd: f64,
     pub total_tokens: u64,
-    pub by_provider: [ProviderDay; 2],
+    pub by_provider: [ProviderDay; USAGE_PROVIDER_COUNT],
     /// Distinct sessions active in the month.
     pub sessions: u64,
     /// Days in the month with any tokens.
@@ -907,7 +1323,7 @@ pub struct ProjectSlice {
     pub path: String,
     pub cost_usd: f64,
     pub total_tokens: u64,
-    pub by_provider: [ProviderDay; 2],
+    pub by_provider: [ProviderDay; USAGE_PROVIDER_COUNT],
     pub sessions: u64,
     pub cost_share: f64,
     pub last_day: Option<NaiveDate>,
@@ -997,6 +1413,24 @@ pub fn scan(
         };
         if !root.is_dir() {
             // Provider never used on this machine; zero usage, not an error.
+            continue;
+        }
+        // OpenCode's store is one SQLite database, not jsonl transcripts; it
+        // has its own reader and does not participate in the file cache.
+        if provider == UsageProvider::OpenCode {
+            match read_opencode_records(&root, mtime_cutoff_ms) {
+                Some(records) => {
+                    scanned_files += 1;
+                    for record in records {
+                        aggregator.add(&record, rates);
+                    }
+                }
+                None => errors.push(format!(
+                    "{} usage store at {} could not be read.",
+                    provider.label(),
+                    root.display()
+                )),
+            }
             continue;
         }
         let mut files = Vec::new();
@@ -1105,7 +1539,7 @@ fn derive_history(
             day: *day,
             cost_usd: 0.0,
             total_tokens: 0,
-            by_provider: [ProviderDay::default(); 2],
+            by_provider: [ProviderDay::default(); USAGE_PROVIDER_COUNT],
         });
         day_entry.cost_usd += bucket.cost_usd;
         day_entry.total_tokens += tokens;
@@ -1165,7 +1599,7 @@ fn derive_history(
                 first_day: first_of_month(day.day),
                 cost_usd: 0.0,
                 total_tokens: 0,
-                by_provider: [ProviderDay::default(); 2],
+                by_provider: [ProviderDay::default(); USAGE_PROVIDER_COUNT],
                 sessions: 0,
                 active_days: 0,
                 top_models: Vec::new(),
@@ -1371,6 +1805,126 @@ mod tests {
 
         // The identical re-emitted event is a duplicate, not more usage.
         assert!(parse_codex_line(&count, &mut state).is_none());
+    }
+
+    #[test]
+    fn opencode_messages_parse_tokens_cost_and_cache() {
+        // Shape captured from a live opencode.db `message.data` row.
+        let data = r#"{"role":"assistant","modelID":"ling-3.0-flash-free",
+            "providerID":"opencode","cost":0,
+            "tokens":{"total":16843,"input":1783,"output":52,"reasoning":160,
+            "cache":{"write":0,"read":14848}},
+            "time":{"created":1785861995391,"completed":1785861999368}}"#
+            .replace('\n', " ");
+        let record =
+            parse_opencode_message(&data, "ses_1", "/home/me/dev/app").expect("usage present");
+        assert_eq!(record.provider, UsageProvider::OpenCode);
+        assert_eq!(record.model, "ling-3.0-flash-free");
+        assert_eq!(record.session_id, "ses_1");
+        assert_eq!(record.project, "/home/me/dev/app");
+        assert_eq!(record.timestamp_ms, 1785861995391);
+        assert_eq!(record.totals.uncached_input, 1783);
+        assert_eq!(record.totals.cached_input, 14848);
+        assert_eq!(record.totals.cache_creation, 0);
+        assert_eq!(record.totals.output, 52);
+        assert_eq!(record.totals.reasoning, 160);
+        // The pipeline's total: uncached input + cached counts + output.
+        assert_eq!(record.totals.total(), 1783 + 14848 + 52);
+        // A zero-cost row reports no cost and falls back to rate pricing.
+        assert_eq!(record.reported_cost_usd, None);
+
+        // Tool outputs and aborted turns (no tokens) parse to nothing.
+        assert!(parse_opencode_message(
+            r#"{"role":"assistant","modelID":"m","tokens":{"total":0}}"#,
+            "ses_1",
+            ""
+        )
+        .is_none());
+        // Non-assistant rows are skipped.
+        assert!(parse_opencode_message(
+            r#"{"role":"user","tokens":{"total":10}}"#,
+            "ses_1",
+            ""
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn grok_updates_split_per_model_with_dedupe() {
+        // Shape captured from a live updates.jsonl turn_completed event.
+        let line = r#"{"timestamp":1784297490,"method":"_x.ai/session/update","params":{"sessionId":"019f","update":{"sessionUpdate":"turn_completed","prompt_id":"d1c6","usage":{"inputTokens":96710,"outputTokens":910,"totalTokens":97620,"cachedReadTokens":48256,"reasoningTokens":183,"modelCalls":4,"modelUsage":{"grok-4.5":{"inputTokens":96710,"outputTokens":910,"totalTokens":97620,"cachedReadTokens":48256,"reasoningTokens":183}}}}}}"#;
+        let records = parse_grok_update(&line, "019f", "/home/me/dev/app");
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.provider, UsageProvider::Grok);
+        assert_eq!(record.model, "grok-4.5");
+        assert_eq!(record.session_id, "019f");
+        assert_eq!(record.project, "/home/me/dev/app");
+        // inputTokens includes cachedReadTokens; the parser splits them.
+        assert_eq!(record.totals.uncached_input, 96710 - 48256);
+        assert_eq!(record.totals.cached_input, 48256);
+        assert_eq!(record.totals.output, 910);
+        assert_eq!(record.totals.reasoning, 183);
+        assert_eq!(record.totals.total(), 96710 + 910);
+        assert_eq!(
+            record.dedupe_key.as_deref(),
+            Some("grok:019f:d1c6:grok-4.5")
+        );
+
+        // Non-turn_completed updates carry no usage.
+        let phase = r#"{"timestamp":1784297490,"method":"_x.ai/session/update",
+            "params":{"update":{"sessionUpdate":"phase_changed"}}}"#
+            .replace('\n', " ");
+        assert!(parse_grok_update(&phase, "019f", "").is_empty());
+    }
+
+    #[test]
+    fn grok_path_identity_decodes_percent_cwd() {
+        let path = std::path::Path::new(
+            "/home/me/.grok/sessions/%2Fhome%2Fme%2Fdev%2Fapp/019f706a/updates.jsonl",
+        );
+        let (session_id, cwd) = grok_session_identity(path);
+        assert_eq!(session_id, "019f706a");
+        assert_eq!(cwd, "/home/me/dev/app");
+
+        // Malformed escapes survive verbatim rather than losing the session.
+        assert_eq!(percent_decode_path("a%2"), "a%2");
+        assert_eq!(percent_decode_path("plain"), "plain");
+    }
+
+    #[test]
+    fn pi_lines_parse_usage_with_session_state() {
+        // Shape captured from a live .pi session transcript.
+        let header = r#"{"type":"session","version":3,"id":"01a005b4","timestamp":"2026-08-15T13:55:30.061Z","cwd":"/home/doanbactam/agentskills"}"#;
+        let assistant = r#"{"type":"message","id":"2dd45489","timestamp":"2026-08-15T13:55:47.000Z","message":{"role":"assistant","content":[],"provider":"poolside","model":"poolside/laguna-s-2.1","usage":{"input":8370,"output":64,"cacheRead":0,"cacheWrite":0,"reasoning":30,"totalTokens":8434,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}}}"#;
+        let zero_usage = r#"{"type":"message","id":"err1","timestamp":"2026-08-15T13:56:01.000Z","message":{"role":"assistant","model":"gpt-5.5","usage":{"input":0,"output":0,"totalTokens":0,"cost":{"total":0}},"stopReason":"error"}}"#;
+
+        // Before the header, the message has no session context to seed the
+        // file-stem fallback the caller installs; parse still yields a record.
+        let mut state = PiScanState {
+            session_id: "01a005b4".into(),
+            cwd: String::new(),
+        };
+        let record = parse_pi_line(assistant, &state).expect("usage present");
+        assert_eq!(record.provider, UsageProvider::Pi);
+        assert_eq!(record.model, "poolside/laguna-s-2.1");
+        assert_eq!(record.session_id, "01a005b4");
+        assert_eq!(record.totals.uncached_input, 8370);
+        assert_eq!(record.totals.output, 64);
+        assert_eq!(record.totals.reasoning, 30);
+        assert_eq!(record.totals.total(), 8370 + 64);
+        assert_eq!(record.reported_cost_usd, None);
+        assert_eq!(record.dedupe_key.as_deref(), Some("pi:01a005b4:2dd45489"));
+
+        // The header line itself parses to nothing (state lives in the caller).
+        assert!(parse_pi_line(header, &state).is_none());
+        let _ = &mut state; // state stays caller-owned
+
+        // All-zero usage is an aborted turn, not free work.
+        assert!(parse_pi_line(zero_usage, &state).is_none());
+        // User messages carry no usage.
+        let user = r#"{"type":"message","id":"u1","timestamp":"2026-08-15T13:55:46.000Z","message":{"role":"user","content":[]}}"#;
+        assert!(parse_pi_line(user, &state).is_none());
     }
 
     #[test]

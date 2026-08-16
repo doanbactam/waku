@@ -310,8 +310,14 @@ sidebar.all_projects:
   en: All projects
 sidebar.all_providers:
   en: All providers
+sidebar.all_statuses:
+  en: All statuses
 sidebar.projects:
   en: Projects
+sidebar.task_count_one:
+  en: 1 task
+sidebar.task_count_many:
+  en: "%{count} tasks"
 sidebar.no_matching_tasks:
   en: No tasks in this project
 sidebar.clear_filters:

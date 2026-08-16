@@ -195,6 +195,8 @@ impl Render for Waku {
             .on_action(cx.listener(Self::toggle_fps_counter_action))
             .on_action(cx.listener(Self::navigate_back_action))
             .on_action(cx.listener(Self::navigate_forward_action))
+            .on_action(cx.listener(Self::focus_next_action))
+            .on_action(cx.listener(Self::focus_prev_action))
             .on_action(cx.listener(Self::focus_composer_action))
             .on_action(cx.listener(Self::toggle_model_picker_action))
             .on_action(cx.listener(Self::toggle_usage_panel_action))

@@ -149,7 +149,10 @@ sidebar.days_ago: "%{count} 天前"
 sidebar.unknown_project: 未知项目
 sidebar.all_projects: 全部项目
 sidebar.all_providers: 全部提供商
+sidebar.all_statuses: 全部状态
 sidebar.projects: 项目
+sidebar.task_count_one: "%{count} 个任务"
+sidebar.task_count_many: "%{count} 个任务"
 sidebar.no_matching_tasks: 该项目下没有任务
 sidebar.clear_filters: 清除筛选
 project.new_project: 新建项目…

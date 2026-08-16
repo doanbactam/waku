@@ -54,16 +54,20 @@ above native page pixels.
   returns `false` and GPUI's own focus drives the surface. No
   snapshot/overlay: the child HWND is hidden while a menu is open. `stop`
   is a no-op (wry's portable API doesn't expose WebView2's Stop yet).
-- **Linux**: gated off. GPUI exposes Xcb/Wayland window handles, and wry's
-  `build_as_child` needs an Xlib handle (or a GTK container via
-  `build_gtk`, which GPUI does not host). The browser surface shows
-  `browser.unsupported_platform` until either wry accepts Xcb/Wayland or
-  GPUI exposes a GTK container.
+- **Linux/X11**: native WebKitGTK child surface via wry. GPUI exposes an Xcb
+  handle while wry requires Xlib, so Waku adapts the X11 window id before
+  calling `build_as_child`. Bounds, visibility, navigation, downloads and
+  title/load callbacks use the same path as Windows.
+- **Linux/Wayland**: still gated. wry requires a GTK container for a
+  Wayland-compatible host, while GPUI currently exposes no GTK container or
+  foreign-subsurface seam. Waku reports a clear host error instead of
+  pretending the X11 adapter works on Wayland.
 
-wry is a dependency on macOS and Windows (`cfg(any(target_os = "macos",
-target_os = "windows"))`). The macOS-specific focus/snapshot code stays
-`cfg(target_os = "macos")` inside the host module; the Windows host is a
-plain wry webview without the overlay refinement.
+wry is a dependency on macOS, Windows and Linux. Linux additionally needs
+GTK 3 and WebKitGTK 4.1 development/runtime packages (`gtk3-devel` and
+`webkit2gtk4.1-devel` on Fedora). The macOS-specific focus/snapshot code stays
+`cfg(target_os = "macos")` inside the host module; Windows and Linux use a
+plain native child webview without the overlay refinement.
 
 ### Computer Use (`src/computer_use.rs`, `src/driver/computer_use.rs`)
 

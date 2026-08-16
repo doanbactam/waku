@@ -4,6 +4,7 @@ use gpui::{
     canvas, div, img, point, prelude::*, px, rgb, svg,
 };
 
+pub mod accessibility;
 pub mod menu;
 pub mod scrollbar;
 pub mod text_field;
