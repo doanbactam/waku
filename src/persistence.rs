@@ -884,6 +884,42 @@ struct Storage {
     saved_app_state: u64,
 }
 
+/// Which half of a checkpoint operation was in progress when the app stopped.
+/// Keeping this explicit lets startup replay a missing turn-start snapshot
+/// without confusing it with the end-of-turn checkpoint attached to a turn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CheckpointJournalPhase {
+    Start,
+    End,
+}
+
+impl CheckpointJournalPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::End => "end",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "start" => Some(Self::Start),
+            "end" => Some(Self::End),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CheckpointJournalEntry {
+    pub(crate) session_id: Uuid,
+    pub(crate) turn_count: usize,
+    pub(crate) phase: CheckpointJournalPhase,
+    pub(crate) project_path: PathBuf,
+    pub(crate) created_at: u64,
+    pub(crate) last_error: Option<String>,
+}
+
 pub struct StateStore {
     path: PathBuf,
     /// App-managed navigation and layout state stays local to this database.
@@ -959,11 +995,11 @@ impl StateStore {
         Arc::clone(&self.blobs)
     }
 
-    fn open(&self) -> io::Result<Connection> {
-        if let Some(parent) = self.path.parent() {
+    fn open_database(path: &Path) -> io::Result<Connection> {
+        if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let connection = Connection::open(&self.path).map_err(to_io_error)?;
+        let connection = Connection::open(path).map_err(to_io_error)?;
         // WAL keeps a streaming save from blocking on readers, and NORMAL
         // sync is the right durability trade for per-second UI state.
         connection
@@ -971,6 +1007,175 @@ impl StateStore {
             .map_err(to_io_error)?;
         apply_migrations(&connection)?;
         Ok(connection)
+    }
+
+    fn open(&self) -> io::Result<Connection> {
+        Self::open_database(&self.path)
+    }
+
+    pub(crate) fn database_path(&self) -> PathBuf {
+        self.path.clone()
+    }
+
+    fn with_checkpoint_journal_connection<T>(
+        database_path: &Path,
+        operation: impl FnOnce(&Connection) -> io::Result<T>,
+    ) -> io::Result<T> {
+        let connection = Self::open_database(database_path)?;
+        operation(&connection)
+    }
+
+    pub(crate) fn begin_checkpoint_journal(
+        &self,
+        session_id: Uuid,
+        turn_count: usize,
+        phase: CheckpointJournalPhase,
+        project_path: &Path,
+    ) -> io::Result<()> {
+        Self::begin_checkpoint_journal_at(&self.path, session_id, turn_count, phase, project_path)
+    }
+
+    pub(crate) fn begin_checkpoint_journal_at(
+        database_path: &Path,
+        session_id: Uuid,
+        turn_count: usize,
+        phase: CheckpointJournalPhase,
+        project_path: &Path,
+    ) -> io::Result<()> {
+        Self::with_checkpoint_journal_connection(database_path, |connection| {
+            connection
+                .execute(
+                    "INSERT INTO checkpoint_journal(
+                         session_id, turn_count, phase, project_path, created_at, last_error
+                     ) VALUES(?1, ?2, ?3, ?4, ?5, NULL)
+                     ON CONFLICT(session_id, turn_count, phase) DO UPDATE SET
+                         project_path = excluded.project_path,
+                         created_at = excluded.created_at,
+                         last_error = NULL",
+                    params![
+                        session_id.to_string(),
+                        turn_count as i64,
+                        phase.as_str(),
+                        project_path.to_string_lossy(),
+                        crate::model::unix_time() as i64,
+                    ],
+                )
+                .map_err(to_io_error)?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn complete_checkpoint_journal(
+        &self,
+        session_id: Uuid,
+        turn_count: usize,
+        phase: CheckpointJournalPhase,
+    ) -> io::Result<()> {
+        Self::complete_checkpoint_journal_at(&self.path, session_id, turn_count, phase)
+    }
+
+    pub(crate) fn complete_checkpoint_journal_at(
+        database_path: &Path,
+        session_id: Uuid,
+        turn_count: usize,
+        phase: CheckpointJournalPhase,
+    ) -> io::Result<()> {
+        Self::with_checkpoint_journal_connection(database_path, |connection| {
+            connection
+                .execute(
+                    "DELETE FROM checkpoint_journal
+                     WHERE session_id = ?1 AND turn_count = ?2 AND phase = ?3",
+                    params![session_id.to_string(), turn_count as i64, phase.as_str()],
+                )
+                .map_err(to_io_error)?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn fail_checkpoint_journal(
+        &self,
+        session_id: Uuid,
+        turn_count: usize,
+        phase: CheckpointJournalPhase,
+        error: &str,
+    ) -> io::Result<()> {
+        Self::fail_checkpoint_journal_at(&self.path, session_id, turn_count, phase, error)
+    }
+
+    pub(crate) fn fail_checkpoint_journal_at(
+        database_path: &Path,
+        session_id: Uuid,
+        turn_count: usize,
+        phase: CheckpointJournalPhase,
+        error: &str,
+    ) -> io::Result<()> {
+        Self::with_checkpoint_journal_connection(database_path, |connection| {
+            connection
+                .execute(
+                    "UPDATE checkpoint_journal SET last_error = ?4
+                     WHERE session_id = ?1 AND turn_count = ?2 AND phase = ?3",
+                    params![
+                        session_id.to_string(),
+                        turn_count as i64,
+                        phase.as_str(),
+                        error,
+                    ],
+                )
+                .map_err(to_io_error)?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn clear_checkpoint_journal_for_session(&self, session_id: Uuid) -> io::Result<()> {
+        Self::with_checkpoint_journal_connection(&self.path, |connection| {
+            connection
+                .execute(
+                    "DELETE FROM checkpoint_journal WHERE session_id = ?1",
+                    params![session_id.to_string()],
+                )
+                .map_err(to_io_error)?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn checkpoint_journal_entries(&self) -> io::Result<Vec<CheckpointJournalEntry>> {
+        Self::with_checkpoint_journal_connection(&self.path, |connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT session_id, turn_count, phase, project_path, created_at, last_error
+                     FROM checkpoint_journal
+                     ORDER BY created_at, session_id, turn_count,
+                         CASE phase WHEN 'start' THEN 0 ELSE 1 END",
+                )
+                .map_err(to_io_error)?;
+            let entries = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                    ))
+                })
+                .map_err(to_io_error)?
+                .filter_map(Result::ok)
+                .filter_map(
+                    |(session_id, turn_count, phase, project_path, created_at, last_error)| {
+                        Some(CheckpointJournalEntry {
+                            session_id: Uuid::parse_str(&session_id).ok()?,
+                            turn_count: usize::try_from(turn_count).ok()?,
+                            phase: CheckpointJournalPhase::parse(&phase)?,
+                            project_path: PathBuf::from(project_path),
+                            created_at: u64::try_from(created_at).ok()?,
+                            last_error,
+                        })
+                    },
+                )
+                .collect();
+            Ok(entries)
+        })
     }
 
     pub fn load_or_fresh(&self, cwd: PathBuf) -> PersistedState {
@@ -1818,6 +2023,56 @@ mod tests {
         assert!(settings.get("analytics_id").is_none());
         assert_eq!(app_state["analytics_id"], restored.analytics_id.to_string());
         assert!(app_state.get("analytics_enabled").is_none());
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn checkpoint_journal_survives_and_clears_each_phase() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        store.load().unwrap();
+        let session_id = Uuid::new_v4();
+        let project_path = Path::new("/tmp/waku-project");
+
+        store
+            .begin_checkpoint_journal(session_id, 3, CheckpointJournalPhase::Start, project_path)
+            .unwrap();
+        store
+            .begin_checkpoint_journal(session_id, 3, CheckpointJournalPhase::End, project_path)
+            .unwrap();
+
+        let entries = store.checkpoint_journal_entries().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].session_id, session_id);
+        assert_eq!(entries[0].phase, CheckpointJournalPhase::Start);
+        assert_eq!(entries[1].phase, CheckpointJournalPhase::End);
+
+        store
+            .fail_checkpoint_journal(
+                session_id,
+                3,
+                CheckpointJournalPhase::End,
+                "workspace disappeared",
+            )
+            .unwrap();
+        let entries = store.checkpoint_journal_entries().unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .find(|entry| entry.phase == CheckpointJournalPhase::End)
+                .and_then(|entry| entry.last_error.as_deref()),
+            Some("workspace disappeared")
+        );
+
+        store
+            .complete_checkpoint_journal(session_id, 3, CheckpointJournalPhase::Start)
+            .unwrap();
+        assert_eq!(store.checkpoint_journal_entries().unwrap().len(), 1);
+        store
+            .clear_checkpoint_journal_for_session(session_id)
+            .unwrap();
+        assert!(store.checkpoint_journal_entries().unwrap().is_empty());
 
         fs::remove_dir_all(directory).ok();
     }

@@ -173,9 +173,16 @@ impl Waku {
             .find(|project| project.id == project_id)
             .is_some_and(Project::is_projectless);
         let last_turn_count = self.state.sessions[index].turns.len();
-        let project_path = self
+        let workspace_path = self
             .workspace_path_for_session(&self.state.sessions[index])
             .map(std::path::Path::to_path_buf);
+        let repository_path = self
+            .state
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .map(|project| project.path.clone());
+        let project_path = workspace_path.or(repository_path);
         let was_selected = self.state.selected_session == Some(session_id);
         self.submission_preparations.remove(&session_id);
         self.reset_session_runtime(session_id);
@@ -204,7 +211,9 @@ impl Waku {
         if let Some(project_path) = project_path {
             let _ = checkpoint::delete_session_refs(&project_path, session_id, last_turn_count);
         }
+        let _ = self.store.clear_checkpoint_journal_for_session(session_id);
         self.invalidate_checkpoint_refs();
+        self.start_checkpoint_maintenance(cx);
 
         if was_selected {
             self.state.selected_session = None;

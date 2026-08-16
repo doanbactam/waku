@@ -38,6 +38,9 @@ pub fn turn_diff_base_ref(session_id: Uuid, turn_count: usize) -> String {
 /// checkpoint: a branch switch or terminal edit between turns must not be
 /// attributed to either response.
 pub fn capture_turn_start(cwd: &Path, session_id: Uuid, turn_count: usize) -> anyhow::Result<()> {
+    if !cwd.is_dir() {
+        bail!("checkpoint workspace is missing: {}", cwd.display());
+    }
     if !is_git_repository(cwd) {
         return Ok(());
     }
@@ -77,6 +80,9 @@ pub fn capture_turn_start(cwd: &Path, session_id: Uuid, turn_count: usize) -> an
 }
 
 pub fn capture_turn(cwd: &Path, session_id: Uuid, turn_count: usize) -> anyhow::Result<Checkpoint> {
+    if !cwd.is_dir() {
+        bail!("checkpoint workspace is missing: {}", cwd.display());
+    }
     let git_ref = checkpoint_ref(session_id, turn_count);
     if !is_git_repository(cwd) {
         return Ok(Checkpoint {
@@ -394,6 +400,95 @@ pub fn session_turn_refs(cwd: &Path, session_id: Uuid) -> HashSet<usize> {
         .collect()
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct StorageStats {
+    /// All refs retained under `refs/waku`, including turn starts and diff
+    /// bases. A ref is cheap; the object count and bytes are the useful values.
+    pub ref_count: usize,
+    pub object_count: usize,
+    pub bytes: u64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GcReport {
+    pub removed_sessions: usize,
+    pub removed_refs: usize,
+}
+
+/// Remove checkpoint refs for sessions no longer present in Waku's state.
+///
+/// Refs live in the repository's common Git directory, so this deliberately
+/// accepts the ordinary project checkout. That makes deletion safe even when a
+/// worktree directory was removed by another app before Waku could clean it up.
+pub fn gc_session_refs(cwd: &Path, live_sessions: &HashSet<Uuid>) -> anyhow::Result<GcReport> {
+    if !is_git_repository(cwd) {
+        return Ok(GcReport::default());
+    }
+    let refs = waku_refs(cwd)?;
+    let mut orphan_sessions = HashSet::new();
+    let mut commands = String::new();
+    let mut removed_refs = 0;
+    for git_ref in refs {
+        let Some(session_id) = session_id_from_ref(&git_ref) else {
+            continue;
+        };
+        if live_sessions.contains(&session_id) {
+            continue;
+        }
+        orphan_sessions.insert(session_id);
+        commands.push_str(&format!("delete {git_ref}\n"));
+        removed_refs += 1;
+    }
+    update_refs(cwd, commands)?;
+    Ok(GcReport {
+        removed_sessions: orphan_sessions.len(),
+        removed_refs,
+    })
+}
+
+/// Measure only objects reachable from Waku checkpoint refs. Git's repository
+/// may contain user history and packfiles that must not be attributed to Waku.
+pub fn storage_stats(cwd: &Path) -> anyhow::Result<StorageStats> {
+    if !is_git_repository(cwd) {
+        return Ok(StorageStats::default());
+    }
+    let refs = waku_refs(cwd)?;
+    if refs.is_empty() {
+        return Ok(StorageStats::default());
+    }
+
+    let mut rev_list_args = vec!["rev-list".to_owned(), "--objects".to_owned()];
+    rev_list_args.extend(refs.iter().cloned());
+    let objects = git_output(cwd, rev_list_args)?
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|object| !object.is_empty())
+        .map(str::to_owned)
+        .collect::<HashSet<_>>();
+    let bytes = git_object_sizes(cwd, &objects)?;
+    Ok(StorageStats {
+        ref_count: refs.len(),
+        object_count: objects.len(),
+        bytes,
+    })
+}
+
+/// Resolve the repository root used as the shared checkpoint-ref namespace.
+/// Several Waku projects may point at subdirectories of the same repository,
+/// so maintenance must group their live sessions before collecting refs.
+pub fn repository_root(cwd: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let root = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    (!root.as_os_str().is_empty()).then(|| fs::canonicalize(&root).unwrap_or(root))
+}
+
 pub fn delete_ref(cwd: &Path, git_ref: &str) -> anyhow::Result<()> {
     let output = Command::new("git")
         .args(["update-ref", "-d", git_ref])
@@ -537,6 +632,60 @@ fn session_checkpoint_ref_commits(cwd: &Path, session_id: Uuid) -> SessionCheckp
         refs
     })
     .unwrap_or_default()
+}
+
+fn waku_refs(cwd: &Path) -> anyhow::Result<Vec<String>> {
+    Ok(
+        git_output(cwd, ["for-each-ref", "--format=%(refname)", "refs/waku"])?
+            .lines()
+            .map(str::trim)
+            .filter(|refname| !refname.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+fn session_id_from_ref(git_ref: &str) -> Option<Uuid> {
+    let suffix = git_ref.strip_prefix("refs/waku/session-")?;
+    let id_end = suffix.find("-turn")?;
+    Uuid::parse_str(&suffix[..id_end]).ok()
+}
+
+fn git_object_sizes(cwd: &Path, objects: &HashSet<String>) -> anyhow::Result<u64> {
+    if objects.is_empty() {
+        return Ok(0);
+    }
+    let mut child = Command::new("git")
+        .args([
+            "cat-file",
+            "--batch-check=%(objectname) %(objecttype) %(objectsize:disk)",
+        ])
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to inspect checkpoint objects")?;
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| anyhow!("git cat-file stdin is unavailable"))?;
+        for object in objects {
+            writeln!(stdin, "{object}").context("failed to send checkpoint objects to git")?;
+        }
+    }
+    let output = child
+        .wait_with_output()
+        .context("failed to inspect checkpoint objects")?;
+    if !output.status.success() {
+        bail!("{}", command_error(&output));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(2))
+        .filter_map(|size| size.parse::<u64>().ok())
+        .sum())
 }
 
 /// Applies a batch of ref updates through one `git update-ref --stdin`.
@@ -1092,6 +1241,29 @@ mod tests {
 
         assert_eq!(second.files.len(), 1);
         assert_eq!(second.files[0].path, "second-turn.txt");
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn gc_removes_orphaned_session_refs_and_reports_reachable_storage() {
+        let directory = diverged_repository();
+        let live = Uuid::new_v4();
+        let orphan = Uuid::new_v4();
+        capture_turn(&directory, live, 0).unwrap();
+        capture_turn_start(&directory, live, 1).unwrap();
+        capture_turn(&directory, live, 1).unwrap();
+        capture_turn(&directory, orphan, 0).unwrap();
+
+        let before = storage_stats(&directory).unwrap();
+        assert_eq!(before.ref_count, 5);
+        assert!(before.object_count > 0);
+        assert!(before.bytes > 0);
+
+        let report = gc_session_refs(&directory, &HashSet::from([live])).unwrap();
+        assert_eq!(report.removed_sessions, 1);
+        assert_eq!(report.removed_refs, 1);
+        assert!(!has_ref(&directory, &checkpoint_ref(orphan, 0)));
+        assert_eq!(storage_stats(&directory).unwrap().ref_count, 4);
         fs::remove_dir_all(directory).ok();
     }
 }

@@ -1932,10 +1932,9 @@ impl Waku {
         let steerable = session.is_some_and(|session| {
             session.is_busy()
                 && session.status != SessionStatus::Connecting
-                && self
-                    .runtimes
-                    .get(&session.id)
-                    .is_some_and(|runtime| runtime.driver.supports_steer())
+                && self.runtimes.get(&session.id).is_some_and(|runtime| {
+                    session.provider.capabilities().steer && runtime.driver.supports_steer()
+                })
         });
         let autocomplete = self.render_composer_autocomplete(window, cx);
         let autocomplete_open = autocomplete.is_some();

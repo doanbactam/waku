@@ -12,7 +12,7 @@
  * fetched only when a session is opened.
  */
 
-import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const projects = sqliteTable("projects", {
   id: text("id").primaryKey(),
@@ -89,3 +89,20 @@ export const sessionDetails = sqliteTable("session_details", {
   sessionId: text("session_id").primaryKey(),
   data: text("data").notNull(),
 });
+
+/**
+ * Durable intent for a checkpoint operation. The row survives a process crash
+ * between the Git snapshot and the session save, so startup can retry it.
+ */
+export const checkpointJournal = sqliteTable(
+  "checkpoint_journal",
+  {
+    sessionId: text("session_id").notNull(),
+    turnCount: integer("turn_count").notNull(),
+    phase: text("phase").notNull(),
+    projectPath: text("project_path").notNull(),
+    createdAt: integer("created_at").notNull(),
+    lastError: text("last_error"),
+  },
+  (table) => [primaryKey({ columns: [table.sessionId, table.turnCount, table.phase] })],
+);

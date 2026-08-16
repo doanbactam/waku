@@ -14,6 +14,22 @@ const SETTINGS_USAGE_MAX_WIDTH: f32 = 1024.0;
 /// Key context the settings sidebar declares around its search field.
 const SETTINGS_SIDEBAR_CONTEXT: &str = "SettingsSidebar";
 
+fn format_checkpoint_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let bytes = bytes as f64;
+    if bytes >= GIB {
+        format!("{:.1} GiB", bytes / GIB)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes / MIB)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes / KIB)
+    } else {
+        format!("{} B", bytes as u64)
+    }
+}
+
 /// The search field while focused inside the sidebar. The field holds real
 /// focus the whole time — the sidebar's selection is only drawn — so `up` and
 /// `down` have to be claimed from under it, and only a binding can do that:
@@ -428,6 +444,22 @@ impl Waku {
             .try_global::<crate::updater::UpdaterState>()
             .is_some_and(|updater| updater.0.is_some());
         let analytics_enabled = self.state.analytics_enabled;
+        let checkpoint_storage_label = if self.checkpoint_maintenance_pending {
+            tr!("checkpoint.storage_checking")
+        } else if let Some(stats) = self.checkpoint_storage.as_ref() {
+            if stats.object_count == 0 {
+                tr!("checkpoint.storage_empty")
+            } else {
+                tr!(
+                    "checkpoint.storage_summary",
+                    bytes = format_checkpoint_bytes(stats.bytes),
+                    objects = stats.object_count,
+                    refs = stats.ref_count
+                )
+            }
+        } else {
+            tr!("checkpoint.storage_checking")
+        };
         let analytics_toggle = div()
             .id("anonymous-analytics-toggle")
             .tab_index(0)
@@ -604,6 +636,38 @@ impl Waku {
                         .child(toggle),
                 )
             })
+            .child(
+                div()
+                    .mt(px(15.0))
+                    .w_full()
+                    .px(px(20.0))
+                    .py(px(12.0))
+                    .rounded(px(13.0))
+                    .bg(theme.raised)
+                    .child(
+                        div()
+                            .text_size(px(13.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(tr!("checkpoint.storage_title")),
+                    )
+                    .child(
+                        div()
+                            .mt(px(5.0))
+                            .text_size(px(12.5))
+                            .line_height(px(18.0))
+                            .text_color(theme.text_secondary)
+                            .child(tr!("checkpoint.storage_description")),
+                    )
+                    .child(
+                        div()
+                            .mt(px(7.0))
+                            .font_family(crate::md::render::MONO_FAMILY)
+                            .text_size(px(10.5))
+                            .text_color(theme.text_tertiary)
+                            .child(SharedString::from(checkpoint_storage_label)),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -1112,6 +1176,38 @@ impl Waku {
             (None, Some(path)) => tr!("providers.detected_at", path = path),
             (None, None) => tr!("providers.searches_path", command = kind.command()),
         };
+        let probe = self.provider_probe(kind);
+        let installed = probe.is_some_and(|probe| probe.installed);
+        let version = self
+            .provider_versions
+            .get(&kind)
+            .and_then(|version| version.clone())
+            .unwrap_or_else(|| tr!("providers.not_available"));
+        let auth = match kind.auth_status(installed) {
+            ProviderAuthStatus::EnvironmentCredential => tr!("providers.auth_environment"),
+            ProviderAuthStatus::ProviderManaged => tr!("providers.auth_provider_managed"),
+            ProviderAuthStatus::Unknown => tr!("providers.auth_unknown"),
+        };
+        let capabilities = kind.capabilities();
+        let supported = |value: bool| {
+            if value {
+                tr!("providers.capability_supported")
+            } else {
+                tr!("providers.capability_unavailable")
+            }
+        };
+        let capabilities_summary = tr!(
+            "providers.capabilities_summary",
+            rewind = supported(capabilities.conversation_rollback),
+            fork = supported(capabilities.conversation_fork),
+            models = supported(capabilities.model_discovery),
+            steer = supported(capabilities.steer)
+        );
+        let recent_error = self
+            .provider_last_errors
+            .get(&kind)
+            .cloned()
+            .unwrap_or_else(|| tr!("providers.no_recent_error"));
 
         let reset = div()
             .id(SharedString::from(format!(
@@ -1192,6 +1288,58 @@ impl Waku {
                     .text_size(px(10.0))
                     .text_color(theme.text_ghost)
                     .child(SharedString::from(caption)),
+            )
+            .child(
+                div()
+                    .mt(px(11.0))
+                    .pt(px(9.0))
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(tr!("providers.diagnostics")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(theme.text_tertiary)
+                            .child(SharedString::from(tr!(
+                                "providers.version_status",
+                                version = version
+                            ))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(theme.text_tertiary)
+                            .child(SharedString::from(tr!("providers.auth_status", status = auth))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .line_height(px(14.0))
+                            .text_color(theme.text_tertiary)
+                            .child(SharedString::from(tr!(
+                                "providers.capabilities_status",
+                                capabilities = capabilities_summary
+                            ))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .line_height(px(14.0))
+                            .text_color(theme.text_tertiary)
+                            .child(SharedString::from(tr!(
+                                "providers.recent_error",
+                                error = recent_error
+                            ))),
+                    ),
             )
     }
 

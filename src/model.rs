@@ -18,6 +18,27 @@ pub enum ProviderKind {
     Pi,
 }
 
+/// Product-level capabilities exposed by a provider integration. These are
+/// intentionally separate from a live driver's transport capabilities: the
+/// transcript can offer a branch or rewind action even when no driver process
+/// is currently resident, while steering requires that live process.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCapabilities {
+    pub conversation_rollback: bool,
+    pub conversation_fork: bool,
+    pub model_discovery: bool,
+    pub steer: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProviderAuthStatus {
+    Unknown,
+    ProviderManaged,
+    EnvironmentCredential,
+}
+
 impl ProviderKind {
     pub const ALL: [Self; 8] = [
         Self::Amp,
@@ -94,39 +115,61 @@ impl ProviderKind {
         }
     }
 
+    pub const fn capabilities(self) -> ProviderCapabilities {
+        // These are Waku integration capabilities, not claims about every
+        // version of a third-party CLI. The native adapters below all expose
+        // the corresponding branch/rewind and steer paths today.
+        ProviderCapabilities {
+            conversation_rollback: true,
+            conversation_fork: true,
+            model_discovery: matches!(
+                self,
+                Self::Codex
+                    | Self::Cursor
+                    | Self::DeepSeek
+                    | Self::OpenCode
+                    | Self::Grok
+                    | Self::Pi
+            ),
+            steer: true,
+        }
+    }
+
+    /// Report only whether a credential source is present; never include its
+    /// value in diagnostics or persisted state.
+    pub fn auth_status(self, installed: bool) -> ProviderAuthStatus {
+        if !installed {
+            return ProviderAuthStatus::Unknown;
+        }
+        let has_environment_credential = match self {
+            Self::Amp => ["AMP_API_KEY"],
+            Self::Claude => ["ANTHROPIC_API_KEY"],
+            Self::Codex => ["OPENAI_API_KEY"],
+            Self::Cursor => ["CURSOR_API_KEY"],
+            Self::DeepSeek => ["DEEPSEEK_API_KEY"],
+            Self::OpenCode => ["OPENCODE_API_KEY"],
+            Self::Grok => ["XAI_API_KEY"],
+            Self::Pi => ["PI_API_KEY"],
+        }
+        .into_iter()
+        .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()));
+        if has_environment_credential {
+            ProviderAuthStatus::EnvironmentCredential
+        } else {
+            ProviderAuthStatus::ProviderManaged
+        }
+    }
+
     pub fn supports_conversation_rollback(self) -> bool {
-        matches!(
-            self,
-            Self::Amp
-                | Self::Claude
-                | Self::Codex
-                | Self::Cursor
-                | Self::DeepSeek
-                | Self::OpenCode
-                | Self::Grok
-                | Self::Pi
-        )
+        self.capabilities().conversation_rollback
     }
 
     pub fn supports_conversation_fork(self) -> bool {
-        matches!(
-            self,
-            Self::Amp
-                | Self::Claude
-                | Self::Codex
-                | Self::Cursor
-                | Self::DeepSeek
-                | Self::OpenCode
-                | Self::Grok
-                | Self::Pi
-        )
+        self.capabilities().conversation_fork
     }
 
     pub fn supports_model_discovery(self) -> bool {
-        matches!(
-            self,
-            Self::Codex | Self::Cursor | Self::DeepSeek | Self::OpenCode | Self::Grok | Self::Pi
-        )
+        self.capabilities().model_discovery
     }
 }
 
@@ -2997,6 +3040,26 @@ mod tests {
         ] {
             assert!(provider.supports_conversation_fork());
             assert!(provider.supports_conversation_rollback());
+        }
+    }
+
+    #[test]
+    fn capability_manifest_matches_provider_action_gates() {
+        for provider in ProviderKind::ALL {
+            let capabilities = provider.capabilities();
+            assert_eq!(
+                capabilities.conversation_fork,
+                provider.supports_conversation_fork()
+            );
+            assert_eq!(
+                capabilities.conversation_rollback,
+                provider.supports_conversation_rollback()
+            );
+            assert_eq!(
+                capabilities.model_discovery,
+                provider.supports_model_discovery()
+            );
+            assert!(capabilities.steer);
         }
     }
 

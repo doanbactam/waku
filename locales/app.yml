@@ -189,6 +189,16 @@ settings.share_anonymous_usage_data:
   en: Share anonymous usage data
 settings.share_anonymous_usage_data_description:
   en: Help improve Waku by sharing feature usage and reliability data. Prompts, responses, project names, file paths, and other perosnal data are never included
+checkpoint.storage_title:
+  en: Checkpoint storage
+checkpoint.storage_description:
+  en: Git snapshots retained for rewind and response branches
+checkpoint.storage_checking:
+  en: Measuring…
+checkpoint.storage_empty:
+  en: No checkpoint objects retained
+checkpoint.storage_summary:
+  en: "%{bytes} · %{objects} objects · %{refs} refs"
 
 providers.coding_agents:
   en: Coding agents
@@ -226,6 +236,32 @@ providers.acp_missing:
   en: ACP adapter missing · install %{command}
 providers.acp_builtin:
   en: ACP built in
+providers.not_available:
+  en: not available
+providers.diagnostics:
+  en: Diagnostics
+providers.version_status:
+  en: "Version: %{version}"
+providers.auth_status:
+  en: "Auth: %{status}"
+providers.auth_environment:
+  en: environment credential present
+providers.auth_provider_managed:
+  en: provider-managed login not verified
+providers.auth_unknown:
+  en: not available
+providers.capabilities_status:
+  en: "Capabilities: %{capabilities}"
+providers.capabilities_summary:
+  en: "rewind %{rewind} · fork %{fork} · model discovery %{models} · steer %{steer}"
+providers.capability_supported:
+  en: available
+providers.capability_unavailable:
+  en: unavailable
+providers.recent_error:
+  en: "Recent error: %{error}"
+providers.no_recent_error:
+  en: none
 
 computer_use.allow_apps:
   en: Let Waku use apps
@@ -932,6 +968,8 @@ errors.provider_not_installed:
   en: "%{provider} is not installed"
 errors.provider_not_found:
   en: "%{provider} is not installed or could not be found"
+errors.worktree_unavailable:
+  en: "This task's worktree is unavailable: %{path}. Restore it or switch the task to Local before sending."
 errors.claude_fork_checkpoint_missing:
   en: Claude omitted the fork checkpoint
 errors.claude_turn_checkpoint_unavailable:
