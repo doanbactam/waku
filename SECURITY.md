@@ -18,11 +18,13 @@ before it has been fixed. Include reproduction steps and the Waku version
 
 ## Branch protection
 
-The `main` branch is protected against accidental or unreviewed changes:
+The `main` branch is protected against untracked or unreviewed changes:
 
-- All changes land through pull requests.
+- Regular pushes are blocked; changes normally land through pull requests.
 - Every pull request requires at least one approving review and resolved
   conversations before it can be merged.
+- Repository admins may bypass the review requirement to push or merge
+  directly (standard for this single-maintainer project).
 - Force pushes and branch deletions are not allowed on `main`.
 
 Changes to this policy are made through the repository settings on GitHub.
